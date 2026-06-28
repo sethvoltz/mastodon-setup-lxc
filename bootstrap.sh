@@ -6,8 +6,9 @@
 #   - rootfs   -> Ceph RBD pool   (storage `ceph`)   — managed, migratable volume
 #   - Garage data -> CephFS        (storage `cephfs`) — bind mount at /mnt/garage-data
 #
-# Run this as root ON A PVE CLUSTER NODE. After it finishes, enter the container
-# and run /root/mastodon-setup/setup.sh.
+# Target host: Proxmox VE 9.x. The container OS (Debian 12) is independent of the
+# host version. Run this as root ON A PVE CLUSTER NODE. After it finishes, enter
+# the container and run /root/mastodon-setup/setup.sh.
 #
 set -euo pipefail
 
@@ -195,15 +196,12 @@ c_hdr "Next steps"
 cat <<EOF
 Container $CTID ($CT_HOSTNAME) is up.
 
-Before running setup.sh, copy your Cloudflare Tunnel credentials file in:
-
-    pct exec $CTID -- mkdir -p /etc/cloudflared
-    pct push $CTID /path/to/<TUNNEL_ID>.json /etc/cloudflared/<TUNNEL_ID>.json
-
-Then run the installer inside the container:
+Run the installer inside the container:
 
     pct enter $CTID
     /root/mastodon-setup/setup.sh
 
-See README.md for the full prerequisite checklist (tunnel creation, DNS, etc.).
+setup.sh creates the Cloudflare Tunnel and DNS records for you via the Cloudflare
+API — you only need a Cloudflare API token and your Account ID (see README.md).
+No need to run cloudflared anywhere else.
 EOF

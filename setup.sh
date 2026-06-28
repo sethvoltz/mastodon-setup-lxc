@@ -111,27 +111,67 @@ render_template() {     # render_template SRC DST
   printf '%s\n' "$content" > "$dst"
 }
 
+# --- Cloudflare API helpers (Phase 11: provision the tunnel + DNS, no browser) ---
+cf_api() {              # cf_api METHOD PATH [JSON_BODY] -> response JSON on stdout
+  local method="$1" path="$2" body="${3:-}" resp
+  if [[ -n "$body" ]]; then
+    resp="$(curl -sS -X "$method" "https://api.cloudflare.com/client/v4${path}" \
+      -H "Authorization: Bearer ${CF_API_TOKEN}" -H "Content-Type: application/json" --data "$body")"
+  else
+    resp="$(curl -sS -X "$method" "https://api.cloudflare.com/client/v4${path}" \
+      -H "Authorization: Bearer ${CF_API_TOKEN}" -H "Content-Type: application/json")"
+  fi
+  if [[ "$(jq -r '.success' <<<"$resp" 2>/dev/null)" != "true" ]]; then
+    c_err "Cloudflare API error: $method $path"
+    jq -r '.errors' <<<"$resp" >&2 2>/dev/null || printf '%s\n' "$resp" >&2
+    return 1
+  fi
+  printf '%s' "$resp"
+}
+cf_zone_id() {          # cf_zone_id HOST -> id of the longest-matching active zone
+  local cand="$1" resp zid
+  while [[ "$cand" == *.* ]]; do
+    resp="$(cf_api GET "/zones?name=${cand}&status=active")" || return 1
+    zid="$(jq -r '.result[0].id // empty' <<<"$resp")"
+    [[ -n "$zid" ]] && { printf '%s' "$zid"; return 0; }
+    cand="${cand#*.}"
+  done
+  return 1
+}
+cf_dns_upsert() {       # cf_dns_upsert ZONE_ID FQDN TARGET  (proxied CNAME, upsert)
+  local zone="$1" fqdn="$2" target="$3" resp rec_id data
+  resp="$(cf_api GET "/zones/${zone}/dns_records?type=CNAME&name=${fqdn}")" || return 1
+  rec_id="$(jq -r '.result[0].id // empty' <<<"$resp")"
+  data="$(jq -nc --arg n "$fqdn" --arg c "$target" '{type:"CNAME",name:$n,content:$c,proxied:true,ttl:1}')"
+  if [[ -n "$rec_id" ]]; then
+    cf_api PUT "/zones/${zone}/dns_records/${rec_id}" "$data" >/dev/null
+  else
+    cf_api POST "/zones/${zone}/dns_records" "$data" >/dev/null
+  fi
+}
+
 # ===========================================================================
 # Phase 0: Collect inputs
 # ===========================================================================
 if is_done 0; then c_warn "Phase 0 done — skipping input collection."; else
   c_hdr "Phase 0: Collect inputs"
-  need DOMAIN              "Apex domain (e.g. example.com)"
-  need SOCIAL_DOMAIN       "Mastodon (web) domain"            "social.${DOMAIN}"
-  need MEDIA_DOMAIN        "Media domain"                     "media.${DOMAIN}"
+  need WEB_DOMAIN          "Mastodon web domain (full hostname, e.g. example.com or social.example.com)"
+  need MEDIA_DOMAIN        "Media domain (full hostname, e.g. media.example.com)"
   need MASTODON_USER_EMAIL "Owner account email"
   need MASTODON_USERNAME   "Owner account username"
   need SMTP_SERVER         "SMTP server"
   need SMTP_PORT           "SMTP port"                        "587"
   need SMTP_LOGIN          "SMTP login"
   need_secret SMTP_PASSWORD "SMTP password"
-  need SMTP_FROM_ADDRESS   "SMTP From address"                "Mastodon <notifications@${DOMAIN}>"
-  need CF_TUNNEL_ID        "Cloudflare Tunnel UUID"
+  need SMTP_FROM_ADDRESS   "SMTP From address"                "Mastodon <notifications@${WEB_DOMAIN}>"
+  need CF_ACCOUNT_ID       "Cloudflare Account ID"
+  need CF_TUNNEL_NAME      "Cloudflare tunnel name"           "mastodon"
   need GARAGE_BUCKET       "Garage S3 bucket name"            "mastodon"
 
   mountpoint -q "$GARAGE_DATA" && [[ -w "$GARAGE_DATA" ]] \
     || die "$GARAGE_DATA is not a writable mountpoint. Re-check the bootstrap bind-mount step."
   c_ok "$GARAGE_DATA is mounted and writable."
+  c_warn "The Cloudflare API token is requested in Phase 11 and is NOT stored on disk."
   mark_done 0
 fi
 
@@ -149,7 +189,7 @@ if is_done 1; then c_warn "Phase 1 done — skipping."; else
     libidn-dev libicu-dev libjemalloc-dev \
     libprotobuf-dev protobuf-compiler pkg-config \
     autoconf bison libncurses-dev libffi-dev libgdbm-dev \
-    nginx redis-server attr
+    nginx redis-server attr jq
 
   # Swap backstop — asset precompile (Phase 8) peaks ~1.5 GB RSS.
   if ! swapon --show | grep -q '/swapfile'; then
@@ -351,7 +391,7 @@ if is_done 6; then c_warn "Phase 6 done — skipping."; else
   fi
 
   TOKENS=(
-    [SOCIAL_DOMAIN]="$SOCIAL_DOMAIN"
+    [WEB_DOMAIN]="$WEB_DOMAIN"
     [MEDIA_DOMAIN]="$MEDIA_DOMAIN"
     [GARAGE_BUCKET]="$GARAGE_BUCKET"
     [SECRET_KEY_BASE]="$SECRET_KEY_BASE"
@@ -424,7 +464,7 @@ fi
 # ===========================================================================
 if is_done 10; then c_warn "Phase 10 done — skipping."; else
   c_hdr "Phase 10: nginx"
-  TOKENS=( [SOCIAL_DOMAIN]="$SOCIAL_DOMAIN" )
+  TOKENS=( [WEB_DOMAIN]="$WEB_DOMAIN" )
   render_template "${SETUP_DIR}/nginx/mastodon" /etc/nginx/sites-available/mastodon
   ln -sf /etc/nginx/sites-available/mastodon /etc/nginx/sites-enabled/mastodon
   rm -f /etc/nginx/sites-enabled/default
@@ -435,29 +475,63 @@ if is_done 10; then c_warn "Phase 10 done — skipping."; else
 fi
 
 # ===========================================================================
-# Phase 11: Cloudflare Tunnel (locally-managed, credentials file)
+# Phase 11: Cloudflare Tunnel (created here via the Cloudflare API)
 # ===========================================================================
+# The tunnel, its credentials, and the proxied DNS records are all provisioned
+# from inside the container via the Cloudflare API — no browser login and no
+# cloudflared run on any other machine. The tunnel is locally-managed
+# (config_src=local), so ingress comes from our rendered config.yml.
 if is_done 11; then c_warn "Phase 11 done — skipping."; else
   c_hdr "Phase 11: Cloudflare Tunnel"
+  # API token is requested here (only when this phase runs) and never persisted.
+  [[ -n "${CF_API_TOKEN:-}" ]] || prompt_secret CF_API_TOKEN \
+    "Cloudflare API token (Account:Cloudflare Tunnel:Edit + Zone:DNS:Edit + Zone:Read)"
+
   if ! command -v cloudflared >/dev/null 2>&1; then
     curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared bookworm main" \
       > /etc/apt/sources.list.d/cloudflared.list
     apt update && apt install -y cloudflared
   fi
+
+  # 1) Find or create the named, locally-managed tunnel.
+  RESP="$(cf_api GET "/accounts/${CF_ACCOUNT_ID}/cfd_tunnel?name=${CF_TUNNEL_NAME}&is_deleted=false")" \
+    || die "Cloudflare API call failed — check the API token and account ID."
+  CF_TUNNEL_ID="$(jq -r '.result[0].id // empty' <<<"$RESP")"
+  if [[ -z "$CF_TUNNEL_ID" ]]; then
+    RESP="$(cf_api POST "/accounts/${CF_ACCOUNT_ID}/cfd_tunnel" \
+      "$(jq -nc --arg n "$CF_TUNNEL_NAME" '{name:$n, config_src:"local"}')")"
+    CF_TUNNEL_ID="$(jq -r '.result.id' <<<"$RESP")"
+    c_ok "Created tunnel '${CF_TUNNEL_NAME}' (${CF_TUNNEL_ID})."
+  else
+    c_ok "Reusing existing tunnel '${CF_TUNNEL_NAME}' (${CF_TUNNEL_ID})."
+  fi
+  state_put CF_TUNNEL_ID "$CF_TUNNEL_ID"
+
+  # 2) Fetch the connector token and derive the credentials file cloudflared needs.
+  TOKEN="$(jq -r '.result' <<<"$(cf_api GET "/accounts/${CF_ACCOUNT_ID}/cfd_tunnel/${CF_TUNNEL_ID}/token")")"
+  TOKDEC="$(base64 -d <<<"$TOKEN" 2>/dev/null)" || die "Could not decode the tunnel token."
   mkdir -p /etc/cloudflared
-  CREDS="/etc/cloudflared/${CF_TUNNEL_ID}.json"
-  [[ -f "$CREDS" ]] || die "Tunnel credentials not found at ${CREDS}. Copy <TUNNEL_ID>.json in (see README) and re-run."
-  chmod 600 "$CREDS"
+  jq -n --argjson t "$TOKDEC" '{AccountTag:$t.a, TunnelID:$t.t, TunnelSecret:$t.s}' \
+    > "/etc/cloudflared/${CF_TUNNEL_ID}.json"
+  chmod 600 "/etc/cloudflared/${CF_TUNNEL_ID}.json"
 
-  TOKENS=( [CF_TUNNEL_ID]="$CF_TUNNEL_ID" [MEDIA_DOMAIN]="$MEDIA_DOMAIN" [SOCIAL_DOMAIN]="$SOCIAL_DOMAIN" )
+  # 3) Provision proxied DNS (CNAME -> <tunnel>.cfargotunnel.com) for both hostnames.
+  CF_TARGET="${CF_TUNNEL_ID}.cfargotunnel.com"
+  WEB_ZONE="$(cf_zone_id "$WEB_DOMAIN")"     || die "No active Cloudflare zone found for ${WEB_DOMAIN}."
+  MEDIA_ZONE="$(cf_zone_id "$MEDIA_DOMAIN")" || die "No active Cloudflare zone found for ${MEDIA_DOMAIN}."
+  cf_dns_upsert "$WEB_ZONE"   "$WEB_DOMAIN"   "$CF_TARGET"
+  cf_dns_upsert "$MEDIA_ZONE" "$MEDIA_DOMAIN" "$CF_TARGET"
+  c_ok "DNS set (proxied): ${WEB_DOMAIN}, ${MEDIA_DOMAIN} -> ${CF_TARGET}"
+
+  # 4) Render ingress and run the tunnel from our systemd unit.
+  TOKENS=( [CF_TUNNEL_ID]="$CF_TUNNEL_ID" [MEDIA_DOMAIN]="$MEDIA_DOMAIN" [WEB_DOMAIN]="$WEB_DOMAIN" )
   render_template "${SETUP_DIR}/cloudflared/config.yml" /etc/cloudflared/config.yml
-
-  # Use our own config-file unit (disable any packaged service first).
   systemctl disable --now cloudflared 2>/dev/null || true
   install -m 0644 "${SETUP_DIR}/systemd/cloudflared.service" /etc/systemd/system/cloudflared.service
   systemctl daemon-reload
   systemctl enable --now cloudflared
+  unset CF_API_TOKEN
   c_ok "cloudflared tunnel ${CF_TUNNEL_ID} started."
   mark_done 11
 fi
@@ -518,7 +592,7 @@ for u in postgresql redis-server nginx mastodon-web mastodon-sidekiq "$STREAMING
 done
 check_http "web /health"        "http://127.0.0.1:3000/health"
 check_http "streaming /health"  "http://127.0.0.1:4000/api/v1/streaming/health"
-RESULTS+=("nginx loopback|$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${SOCIAL_DOMAIN}" http://127.0.0.1:80/health 2>/dev/null || echo 000)")
+RESULTS+=("nginx loopback|$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${WEB_DOMAIN}" http://127.0.0.1:80/health 2>/dev/null || echo 000)")
 garage bucket info "$GARAGE_BUCKET" >/dev/null 2>&1 && RESULTS+=("garage bucket|PASS") || RESULTS+=("garage bucket|FAIL")
 ( mountpoint -q "$GARAGE_DATA" && [[ -w "$GARAGE_DATA" ]] ) && RESULTS+=("garage-data mount|PASS") || RESULTS+=("garage-data mount|FAIL")
 
@@ -533,7 +607,7 @@ cat <<EOF
 ==========================================================================
  Mastodon deployment complete.
 
- 1. Your instance:  https://${SOCIAL_DOMAIN}
+ 1. Your instance:  https://${WEB_DOMAIN}
  2. Log in as '${MASTODON_USERNAME}'$( [[ -n "$OWNER_PW" ]] && echo " with password: ${OWNER_PW}" || true )
  3. Admin -> Site Settings: fill in instance details
  4. Confirm the tunnel is healthy: Cloudflare Zero Trust -> Networks -> Tunnels

@@ -1,6 +1,6 @@
 server {
   listen 127.0.0.1:80;
-  server_name %%SOCIAL_DOMAIN%%;
+  server_name %%WEB_DOMAIN%%;
 
   root /home/mastodon/live/public;
 

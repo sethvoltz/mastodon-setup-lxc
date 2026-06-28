@@ -2,14 +2,16 @@
 
 A self-hosted, single-user-friendly Mastodon deployment for a Proxmox VE Ceph cluster.
 
-- **Container**: privileged Debian 12 LXC. Rootfs on the Ceph **RBD** pool (`ceph`).
+- **Container**: privileged Debian 12 LXC. Rootfs on the Ceph **RBD** pool (`ceph`). (The container OS is independent of the host; this targets **Proxmox VE 9.x**.)
 - **Object storage**: [Garage](https://garagehq.deuxfleurs.fr/) S3 server. Metadata on the RBD rootfs; data blocks on **CephFS** (`cephfs`) via a bind mount at `/mnt/garage-data`.
-- **Ingress**: a single locally-managed **Cloudflare Tunnel**. No open ports, no public static IP. nginx serves plain HTTP on loopback; the tunnel provides edge encryption.
+- **Ingress**: a single Cloudflare Tunnel, **created automatically by `setup.sh` via the Cloudflare API** — no `cloudflared` on any other machine. No open ports, no public static IP. nginx serves plain HTTP on loopback; the tunnel provides edge encryption.
 - **Mobility**: rootfs (RBD) is a managed, migratable volume; Garage data (CephFS) is cluster-wide, so the container relocates between nodes during reboot cycles.
 
+You choose two hostnames — a **web domain** (where Mastodon lives) and a **media domain** — anywhere in your Cloudflare zone(s). Nothing assumes a `social.` prefix.
+
 ```
-Internet → Cloudflare edge → cloudflared tunnel ─┬─ social.<domain> → nginx :80 → web :3000 / streaming :4000
-                                                 └─ media.<domain>  → garage web :3902
+Internet → Cloudflare edge → cloudflared tunnel ─┬─ <web-domain>   → nginx :80 → web :3000 / streaming :4000
+                                                 └─ <media-domain> → garage web :3902
 ```
 
 ---
@@ -19,7 +21,7 @@ Internet → Cloudflare edge → cloudflared tunnel ─┬─ social.<domain> �
 | File | Runs where | Purpose |
 |------|-----------|---------|
 | `bootstrap.sh` | PVE host | Creates the LXC (RBD rootfs, CephFS data bind mount) and copies the installer in. |
-| `setup.sh` | inside LXC | Installs and configures everything, in 14 resumable phases. |
+| `setup.sh` | inside LXC | Installs and configures everything, in 14 resumable phases (incl. tunnel + DNS via API). |
 | `garage/garage.toml` | inside LXC | Garage config template (S3 API + web endpoint). |
 | `nginx/mastodon` | inside LXC | nginx site (plain HTTP on loopback). |
 | `cloudflared/config.yml` | inside LXC | Tunnel ingress template. |
@@ -36,21 +38,24 @@ Templates use `%%TOKEN%%` substitution markers; `setup.sh` fills them in. See **
 Complete all of these **before** running any script.
 
 ### Domain & Cloudflare
-- [ ] Domain registered; nameservers pointing to Cloudflare; the domain added to your Cloudflare account.
-- [ ] **Cloudflare Tunnel created (locally-managed).** On any machine with `cloudflared` installed and logged in:
-  ```bash
-  cloudflared tunnel login                     # browser auth; downloads cert.pem for management
-  cloudflared tunnel create mastodon           # prints the TUNNEL UUID; writes ~/.cloudflared/<UUID>.json
-  cloudflared tunnel route dns mastodon social.<domain>
-  cloudflared tunnel route dns mastodon media.<domain>
-  ```
-  Note the **tunnel UUID** and keep the `<UUID>.json` credentials file — you copy it into the container in step 3.
-  (If you prefer, create the two DNS records by hand as proxied — orange-cloud — CNAMEs to `<UUID>.cfargotunnel.com`.)
+- [ ] Your domain is added to Cloudflare (nameservers pointing to Cloudflare) and the zone is **Active**.
+- [ ] Pick your two hostnames:
+  - **web domain** — where Mastodon lives. Your apex (`example.com`) or any subdomain (`social.example.com`, `mastodon.example.com`, …). This is also your fediverse identity (handles become `@you@<web-domain>`).
+  - **media domain** — e.g. `media.example.com`. Can be in the same zone or a different zone.
+- [ ] **Create a Cloudflare API token** (dashboard → My Profile → API Tokens → Create Token → *Custom token*) with these permissions:
+  - **Account » Cloudflare Tunnel » Edit**
+  - **Zone » DNS » Edit**
+  - **Zone » Zone » Read**
+
+  Scope it to the account and the zone(s) that hold your two hostnames. Copy the token — you paste it once during setup (Phase 11) and it is **not stored on disk**.
+- [ ] Note your **Cloudflare Account ID** (dashboard → any domain → Overview, right-hand sidebar; or Account Home).
 - [ ] **Bot Fight Mode disabled**: Security → Bots. (It breaks federation link previews, domain verification, and `fediverse:creator` — Mastodon's crawler can't solve JS challenges. Also check Super Bot Fight Mode.)
 - [ ] **WebSockets ON**: Network → WebSockets (default on; verify on free plans).
 
+> `setup.sh` creates the tunnel **and** the proxied DNS records for both hostnames automatically through the API. You do not run `cloudflared` anywhere else, and you do not create DNS records by hand.
+
 ### Proxmox / Ceph
-- [ ] A PVE 8.x cluster with an RBD pool exposed as storage **`ceph`** and CephFS exposed as storage **`cephfs`**, both active on the target node.
+- [ ] A **PVE 9.x** cluster with an RBD pool exposed as storage **`ceph`** and CephFS exposed as storage **`cephfs`**, both active on the target node.
 - [ ] **≥ 100 GB free on `cephfs`** for Garage data.
 
 ### Mail
@@ -69,20 +74,16 @@ It prompts for the container ID, hostname, resources, storage names (`ceph` / `c
 
 ---
 
-## 3. Copy the tunnel credentials in, then run `setup.sh`
+## 3. Run `setup.sh` inside the LXC
 
-From the PVE host, copy your tunnel credentials file into the container:
-```bash
-pct exec <CTID> -- mkdir -p /etc/cloudflared
-pct push <CTID> /path/to/<UUID>.json /etc/cloudflared/<UUID>.json
-```
-
-Then enter the container and run the installer:
 ```bash
 pct enter <CTID>
 /root/mastodon-setup/setup.sh
 ```
-`setup.sh` is interactive in Phase 0 (domains, owner account, SMTP, tunnel UUID, bucket name) and runs phases 1–14. If a phase fails, fix the cause and re-run the same command — completed phases are skipped via `/root/mastodon-setup/.install-state`.
+- **Phase 0** prompts for your web/media domains, owner account, SMTP, Cloudflare **Account ID**, and tunnel name (default `mastodon`).
+- **Phase 11** prompts for your Cloudflare **API token** (not stored), then creates the tunnel, writes its credentials, and provisions the proxied DNS records for both hostnames.
+
+Phases 1–14 run in order. If a phase fails, fix the cause and re-run the same command — completed phases are skipped via `/root/mastodon-setup/.install-state`.
 
 At the end it prints a health-check table and the generated **owner password** — save it.
 
@@ -91,10 +92,10 @@ At the end it prints a health-check table and the generated **owner password** �
 ## 4. Post-deploy steps
 
 - [ ] Save the generated owner password (also stored, chmod 600, in `/root/mastodon-setup/.secrets`).
-- [ ] Log in at `https://social.<domain>` and complete **Admin → Site Settings**.
+- [ ] Log in at `https://<web-domain>` and complete **Admin → Site Settings**.
 - [ ] (Optional) Enable single-user mode: uncomment `SINGLE_USER_MODE=true` in `/home/mastodon/live/.env.production`, then `systemctl restart mastodon-web`.
 - [ ] Verify **federation**: search for a known remote account (e.g. `@Gargron@mastodon.social`).
-- [ ] Verify **media**: post an image and confirm it loads from `https://media.<domain>/...`.
+- [ ] Verify **media**: post an image and confirm it loads from `https://<media-domain>/...`.
 
 ---
 
@@ -118,7 +119,7 @@ git fetch --tags
 
 ## 6. Transferring an existing account in
 
-1. On the **source** instance, start the move: Settings → Account → Move to a different account, pointing at `you@social.<domain>`.
+1. On the **source** instance, start the move: Settings → Account → Move to a different account, pointing at `you@<web-domain>`.
 2. Wait for federation to propagate (can take hours).
 3. The transferred account arrives as a **regular user**. Elevate it:
    ```bash
@@ -131,7 +132,7 @@ git fetch --tags
 
 ## 7. Sysadmin primer — how to check that each piece is healthy
 
-New to Linux service administration? This section shows the exact commands, what healthy output looks like, and what a problem looks like. Everything is copy-pasteable from inside the container (`pct enter <CTID>`).
+New to Linux service administration? This section shows the exact commands, what healthy output looks like, and what a problem looks like. Everything is copy-pasteable from inside the container (`pct enter <CTID>`). Replace `<web-domain>` / `<media-domain>` with the hostnames you chose.
 
 ### Services (systemd)
 Each component is a systemd service. Check one:
@@ -167,7 +168,7 @@ Healthy logs are steady request/job lines. Trouble looks like repeated Ruby back
 ```bash
 curl -fsS http://127.0.0.1:3000/health                       # web    -> "OK"
 curl -fsS http://127.0.0.1:4000/api/v1/streaming/health      # stream -> "OK"
-curl -s -o /dev/null -w '%{http_code}\n' -H "Host: social.<domain>" http://127.0.0.1:80/health   # nginx -> 200
+curl -s -o /dev/null -w '%{http_code}\n' -H "Host: <web-domain>" http://127.0.0.1:80/health   # nginx -> 200
 ```
 `200` / `OK` = good. `Connection refused` = the service behind it is down (check `systemctl`/`journalctl`). `502/504` = nginx is up but the app behind it isn't answering.
 
@@ -191,20 +192,20 @@ garage bucket info mastodon             # bucket exists; shows website + alias +
 garage bucket list                      # all buckets
 garage key list                         # 'mastodon-key' should be present
 ```
-Healthy: `garage status` shows your single node as `Up`, and `garage bucket info mastodon` lists the `media.<domain>` alias, `Website access: true`, and the key with read/write. If media is broken, this is the first place to look.
+Healthy: `garage status` shows your single node as `Up`, and `garage bucket info mastodon` lists the `<media-domain>` alias, `Website access: true`, and the key with read/write. If media is broken, this is the first place to look.
 
 ### Object storage, end-to-end
-After posting an image, copy its media URL from the web UI (it will be under `https://media.<domain>/...`) and fetch it:
+After posting an image, copy its media URL from the web UI (under `https://<media-domain>/...`) and fetch it:
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' "https://media.<domain>/<path-from-a-real-post>"
+curl -s -o /dev/null -w '%{http_code}\n' "https://<media-domain>/<path-from-a-real-post>"
 ```
-`200` = public read works. `403`/`404` = check `garage bucket website --allow mastodon`, the `media.<domain>` alias, and that the tunnel routes `media.<domain>` to `:3902`.
+`200` = public read works. `403`/`404` = check `garage bucket website --allow mastodon`, the `<media-domain>` alias, and that the tunnel routes `<media-domain>` to `:3902`.
 
 ### Cloudflare Tunnel
 ```bash
 journalctl -u cloudflared -n 50 --no-pager       # look for "Registered tunnel connection"
 ```
-Several `Registered tunnel connection` lines = healthy. Also confirm the tunnel shows green in **Cloudflare → Zero Trust → Networks → Tunnels**. If the tunnel itself is blocked, check Super Bot Fight Mode.
+Several `Registered tunnel connection` lines = healthy. Also confirm the tunnel shows green in **Cloudflare → Zero Trust → Networks → Tunnels** (it will be listed as locally-managed). If the tunnel itself is blocked, check Super Bot Fight Mode.
 
 ### Storage & capacity
 ```bash
@@ -289,28 +290,38 @@ You can re-run the installer at any time to reprint the Phase 14 pass/fail table
 | Symptom | Check |
 |---------|-------|
 | Federation not working | Bot Fight Mode disabled? `journalctl -u mastodon-sidekiq`; confirm nginx sends `X-Forwarded-Proto https`. |
-| Media not loading | `garage status`; `media.<domain>` DNS/tunnel route; `garage bucket info mastodon` (website + alias); tunnel routes media → `:3902`. |
+| Media not loading | `garage status`; `<media-domain>` DNS/tunnel route; `garage bucket info mastodon` (website + alias); tunnel routes media → `:3902`. |
 | WebSocket disconnects | Cloudflare WebSockets ON; streaming service active; nginx `/api/v1/streaming` upgrade headers present. |
-| Tunnel unhealthy | `journalctl -u cloudflared`; Super Bot Fight Mode; confirm credentials-file mode (a `<UUID>.json` exists and `config.yml` references it). |
+| Tunnel unhealthy | `journalctl -u cloudflared`; Super Bot Fight Mode; confirm `/etc/cloudflared/<tunnel-id>.json` exists and `config.yml` references it. |
+| Tunnel/DNS not created | Re-run `setup.sh` (re-prompts for the API token); confirm token scopes (Tunnel:Edit, DNS:Edit, Zone:Read) and that both hostnames' zones are Active. |
 | After a node move | `mountpoint /mnt/garage-data`? `garage status` healthy? |
 
 ---
 
-## Token reference
+## Token & input reference
 
-`setup.sh` substitutes these `%%TOKEN%%` markers when rendering templates:
+**Operator inputs** (prompted by `setup.sh`):
+
+| Input | When | Stored? |
+|-------|------|---------|
+| `WEB_DOMAIN`, `MEDIA_DOMAIN` | Phase 0 | yes (state file) |
+| `MASTODON_USERNAME`, `MASTODON_USER_EMAIL` | Phase 0 | yes |
+| `SMTP_SERVER`, `SMTP_PORT`, `SMTP_LOGIN`, `SMTP_PASSWORD`, `SMTP_FROM_ADDRESS` | Phase 0 | yes (state file, chmod 600) |
+| `CF_ACCOUNT_ID`, `CF_TUNNEL_NAME` | Phase 0 | yes |
+| `GARAGE_BUCKET` (default `mastodon`) | Phase 0 | yes |
+| `CF_API_TOKEN` | Phase 11 | **no** — used in-memory, then unset |
+
+**Template tokens** filled in when rendering configs:
 
 | Token | Source |
 |-------|--------|
-| `DOMAIN`, `SOCIAL_DOMAIN`, `MEDIA_DOMAIN` | Phase 0 prompts |
-| `MASTODON_USERNAME`, `MASTODON_USER_EMAIL` | Phase 0 prompts |
-| `SMTP_SERVER`, `SMTP_PORT`, `SMTP_LOGIN`, `SMTP_PASSWORD`, `SMTP_FROM_ADDRESS` | Phase 0 prompts |
-| `CF_TUNNEL_ID` | Phase 0 prompt (the tunnel UUID from `cloudflared tunnel create`) |
-| `GARAGE_BUCKET` | Phase 0 prompt (default `mastodon`) |
+| `WEB_DOMAIN`, `MEDIA_DOMAIN`, `GARAGE_BUCKET` | Phase 0 inputs |
+| `SMTP_*` | Phase 0 inputs |
+| `CF_TUNNEL_ID` | Generated in Phase 11 (created via the Cloudflare API) |
 | `SECRET_KEY_BASE`, `OTP_SECRET` | Generated in Phase 6 (`rails secret`) |
 | `VAPID_PRIVATE_KEY`, `VAPID_PUBLIC_KEY` | Generated in Phase 6 (`mastodon:webpush:generate_vapid_key`) |
 | `AR_ENCRYPTION_PRIMARY_KEY`, `AR_ENCRYPTION_DETERMINISTIC_KEY`, `AR_ENCRYPTION_KEY_DERIVATION_SALT` | Generated in Phase 6 (`db:encryption:init`) |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Generated in Phase 5 (`garage key create`) |
 | `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_METRICS_TOKEN` | Generated in Phase 5 (`openssl rand`) |
 
-Generated secrets are written to `/root/mastodon-setup/.secrets` (chmod 600) and reused on re-runs.
+Generated secrets are written to `/root/mastodon-setup/.secrets` (chmod 600) and reused on re-runs. The Cloudflare API token is never written to disk.

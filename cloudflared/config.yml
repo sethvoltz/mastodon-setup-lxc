@@ -5,7 +5,7 @@ ingress:
   - hostname: %%MEDIA_DOMAIN%%
     service: http://127.0.0.1:3902      # Garage web endpoint (public media reads)
 
-  - hostname: %%SOCIAL_DOMAIN%%
+  - hostname: %%WEB_DOMAIN%%
     service: http://127.0.0.1:80        # nginx; nginx routes /api/v1/streaming -> :4000 itself
 
   - service: http_status:404
