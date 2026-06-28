@@ -1,0 +1,24 @@
+metadata_dir = "/var/lib/garage/meta"      # rootfs (RBD) — LMDB lives here, never on CephFS
+data_dir     = "/mnt/garage-data/data"     # CephFS bind mount — write-once data blocks
+db_engine    = "lmdb"
+
+replication_factor = 1                      # single node. (Garage <0.9 used: replication_mode = "none")
+
+rpc_bind_addr   = "127.0.0.1:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret      = "%%GARAGE_RPC_SECRET%%"
+
+[s3_api]
+s3_region     = "garage"                    # any non-empty string; must match S3_REGION in Mastodon
+api_bind_addr = "127.0.0.1:3900"
+root_domain   = ".s3.%%MEDIA_DOMAIN%%"
+
+[s3_web]
+bind_addr   = "127.0.0.1:3902"              # public media reads (served via bucket website + alias)
+root_domain = ".%%MEDIA_DOMAIN%%"
+index       = "index.html"
+
+[admin]
+api_bind_addr = "127.0.0.1:3903"
+admin_token   = "%%GARAGE_ADMIN_TOKEN%%"
+metrics_token = "%%GARAGE_METRICS_TOKEN%%"

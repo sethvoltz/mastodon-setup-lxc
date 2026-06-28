@@ -1,0 +1,19 @@
+[Unit]
+Description=Garage S3 storage daemon
+After=network-online.target
+Wants=network-online.target
+# /mnt/garage-data is a PVE bind mount present before container init; guard anyway.
+
+[Service]
+Type=simple
+User=garage
+Group=garage
+Environment=GARAGE_CONFIG_FILE=/etc/garage/garage.toml
+ExecStartPre=/usr/bin/test -w /mnt/garage-data
+ExecStart=/usr/local/bin/garage server
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
