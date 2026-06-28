@@ -59,7 +59,18 @@ Complete all of these **before** running any script.
 - [ ] **≥ 100 GB free on `cephfs`** for Garage data.
 
 ### Mail
-- [ ] SMTP provider credentials (Postmark, Mailgun, SES, …). Do **not** self-host SMTP for a homelab instance.
+- [ ] SMTP provider credentials. Do **not** self-host SMTP for a homelab instance.
+
+**Mailgun** (used here): the template's defaults (port 587, `plain` auth, STARTTLS auto) already fit Mailgun — just enter the right values at the Phase 0 prompts:
+- [ ] **Verify a sending domain** in Mailgun (Sending → Domains → Add domain). Add the SPF (`TXT`), DKIM (`TXT`), and tracking (`CNAME`) records Mailgun gives you into Cloudflare DNS, and wait for Mailgun to mark the domain **Verified**. (The free *sandbox* domain only delivers to authorized recipients — use a real domain.)
+- [ ] **Get the domain's SMTP credentials** (Sending → Domain settings → SMTP credentials). The username is `postmaster@<your-mailgun-domain>` by default; reset its password there if needed. **Use the SMTP credential — not your account password or an API key.**
+- [ ] Values to enter in Phase 0:
+  - `SMTP_SERVER` = `smtp.mailgun.org` (US region) or `smtp.eu.mailgun.org` (EU region)
+  - `SMTP_PORT` = `587`
+  - `SMTP_LOGIN` = `postmaster@<your-mailgun-domain>` (or a custom SMTP credential you created)
+  - `SMTP_PASSWORD` = that credential's password
+  - `SMTP_FROM_ADDRESS` = an address on your verified domain, e.g. `Mastodon <notifications@<your-domain>>`
+- [ ] After deploy, confirm delivery by triggering an email (e.g. the account-confirmation or a password-reset mail) and watching `journalctl -u mastodon-sidekiq` for the `ActionMailer`/delivery line — a Mailgun auth or domain error shows up there.
 
 ---
 
