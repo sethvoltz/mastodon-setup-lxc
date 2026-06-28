@@ -1,0 +1,35 @@
+# Secrets & runtime state — generated at deploy time, never commit
+.install-state
+.install-state.*
+.secrets
+.secrets.*
+
+# Rendered runtime config (templates are committed; rendered output is not)
+.env
+.env.*
+.env.production
+*.env.production
+
+# Cloudflare Tunnel credentials
+cloudflared/*.json
+
+# Keys / certs — none should ever live in this repo
+*.pem
+*.key
+*.crt
+
+# Downloaded binaries
+/garage
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+*.sw[op]
+*~
+.vscode/
+.idea/
+
+# Temp / backup
+*.tmp
+*.bak
+*.orig
