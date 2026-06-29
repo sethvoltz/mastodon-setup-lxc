@@ -76,11 +76,19 @@ Complete all of these **before** running any script.
 
 ## 2. Run `bootstrap.sh` on the PVE host
 
-Copy this package to a PVE node and run:
+**Without cloning** (fetches the latest package from GitHub `main`):
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/bootstrap.sh)"
+```
+
+Or from a checkout on the PVE node:
 ```bash
 chmod +x bootstrap.sh
 ./bootstrap.sh
 ```
+
+Pin a branch, tag, or commit by exporting `MASTODON_SETUP_REF` before either command (e.g. `export MASTODON_SETUP_REF=v1.0.0`).
+
 It prompts for the container ID, hostname, resources, storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. It then creates the LXC, attaches the CephFS bind mount, starts the container, and copies `setup.sh` + templates to `/root/mastodon-setup/` inside it.
 
 ---
@@ -91,6 +99,12 @@ It prompts for the container ID, hostname, resources, storage names (`ceph` / `c
 pct enter <CTID>
 /root/mastodon-setup/setup.sh
 ```
+
+If the package was not copied in (or you want to re-fetch templates), run without a checkout:
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh)"
+```
+Templates land in `/root/mastodon-setup/` for re-runs. Use `MASTODON_SETUP_REF` to pin a release the same way as bootstrap.
 - **Phase 0** prompts for your web/media domains, owner account, SMTP, Cloudflare **Account ID**, and tunnel name (default `mastodon`).
 - **Phase 11** prompts for your Cloudflare **API token** (not stored), then creates the tunnel, writes its credentials, and provisions the proxied DNS records for both hostnames.
 

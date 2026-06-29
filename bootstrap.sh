@@ -10,18 +10,70 @@
 # host version. Run this as root ON A PVE CLUSTER NODE. After it finishes, enter
 # the container and run /root/mastodon-setup/setup.sh.
 #
+# Run without cloning:
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/bootstrap.sh)"
+#
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Remote package source (override to pin a branch/tag/commit path segment)
+# ---------------------------------------------------------------------------
+MASTODON_SETUP_REPO="${MASTODON_SETUP_REPO:-sethvoltz/mastodon-setup-lxc}"
+MASTODON_SETUP_REF="${MASTODON_SETUP_REF:-main}"
+RAW_BASE="https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${MASTODON_SETUP_REF}"
+
+PACKAGE_FILES=(
+  "setup.sh"
+  "garage/garage.toml"
+  "systemd/garage.service"
+  "systemd/cloudflared.service"
+  "nginx/mastodon"
+  "cloudflared/config.yml"
+  "env.production.template"
+)
 
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 c_hdr() { printf '\n\033[1;36m=== %s ===\033[0m\n' "$*"; }
 c_ok()  { printf '\033[1;32m[ok]\033[0m %s\n' "$*"; }
 c_warn(){ printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 c_err() { printf '\033[1;31m[err]\033[0m %s\n' "$*" >&2; }
 die()   { c_err "$*"; exit 1; }
+
+package_complete() {
+  local dir="$1" f
+  for f in "${PACKAGE_FILES[@]}"; do
+    [[ -f "$dir/$f" ]] || return 1
+  done
+}
+
+# Fetch missing installer files when run via curl (no local checkout).
+ensure_package_at() {
+  local dest="$1" f
+  package_complete "$dest" && return 0
+  command -v curl >/dev/null || die "curl required to fetch the setup package from GitHub."
+  mkdir -p "$dest/garage" "$dest/systemd" "$dest/nginx" "$dest/cloudflared"
+  for f in "${PACKAGE_FILES[@]}"; do
+    [[ -f "$dest/$f" ]] && continue
+    c_ok "Fetching ${f} (${MASTODON_SETUP_REF})..."
+    curl -fsSL "${RAW_BASE}/${f}" -o "$dest/$f"
+  done
+}
+
+resolve_package_dir() {
+  local candidate=""
+  if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if package_complete "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  fi
+  local dest="${MASTODON_SETUP_CACHE:-$(mktemp -d /tmp/mastodon-setup.XXXXXX)}"
+  ensure_package_at "$dest"
+  printf '%s' "$dest"
+}
 
 # prompt VAR "Question" "default"
 prompt() {
@@ -164,16 +216,8 @@ c_ok "Container running; /mnt/garage-data is writable."
 # ---------------------------------------------------------------------------
 c_hdr "Copying setup package into container"
 
+PACKAGE_DIR="$(resolve_package_dir)"
 REMOTE_DIR="/root/mastodon-setup"
-FILES=(
-  "setup.sh"
-  "garage/garage.toml"
-  "systemd/garage.service"
-  "systemd/cloudflared.service"
-  "nginx/mastodon"
-  "cloudflared/config.yml"
-  "env.production.template"
-)
 
 pct exec "$CTID" -- mkdir -p \
   "$REMOTE_DIR" \
@@ -182,9 +226,9 @@ pct exec "$CTID" -- mkdir -p \
   "$REMOTE_DIR/nginx" \
   "$REMOTE_DIR/cloudflared"
 
-for f in "${FILES[@]}"; do
-  [[ -f "$SCRIPT_DIR/$f" ]] || die "Missing local file: $SCRIPT_DIR/$f"
-  pct push "$CTID" "$SCRIPT_DIR/$f" "$REMOTE_DIR/$f"
+for f in "${PACKAGE_FILES[@]}"; do
+  [[ -f "$PACKAGE_DIR/$f" ]] || die "Missing package file: $PACKAGE_DIR/$f"
+  pct push "$CTID" "$PACKAGE_DIR/$f" "$REMOTE_DIR/$f"
 done
 pct exec "$CTID" -- chmod +x "$REMOTE_DIR/setup.sh"
 c_ok "Package copied to ${REMOTE_DIR} inside container $CTID."

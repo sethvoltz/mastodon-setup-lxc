@@ -9,11 +9,28 @@
 #   Storage: rootfs + Garage metadata on RBD rootfs; Garage data on the CephFS
 #   bind mount at /mnt/garage-data (provided by Proxmox before container init).
 #
+# Run without a local package (fetches templates from GitHub):
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh)"
+#
 set -euo pipefail
 
 # ===========================================================================
 # Constants
 # ===========================================================================
+MASTODON_SETUP_REPO="${MASTODON_SETUP_REPO:-sethvoltz/mastodon-setup-lxc}"
+MASTODON_SETUP_REF="${MASTODON_SETUP_REF:-main}"
+RAW_BASE="https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${MASTODON_SETUP_REF}"
+
+PACKAGE_FILES=(
+  "setup.sh"
+  "garage/garage.toml"
+  "systemd/garage.service"
+  "systemd/cloudflared.service"
+  "nginx/mastodon"
+  "cloudflared/config.yml"
+  "env.production.template"
+)
+
 SETUP_DIR="/root/mastodon-setup"
 STATE_FILE="${SETUP_DIR}/.install-state"
 SECRETS_FILE="${SETUP_DIR}/.secrets"
@@ -40,8 +57,30 @@ c_warn(){ printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 c_err() { printf '\033[1;31m[err]\033[0m %s\n' "$*" >&2; }
 die()   { c_err "$*"; exit 1; }
 
+package_complete() {
+  local dir="$1" f
+  for f in "${PACKAGE_FILES[@]}"; do
+    [[ -f "$dir/$f" ]] || return 1
+  done
+}
+
+# Fetch missing templates when run via curl (no local checkout / bootstrap copy).
+ensure_package_at() {
+  local dest="$1" f
+  package_complete "$dest" && return 0
+  command -v curl >/dev/null || die "curl required to fetch the setup package from GitHub."
+  mkdir -p "$dest/garage" "$dest/systemd" "$dest/nginx" "$dest/cloudflared"
+  for f in "${PACKAGE_FILES[@]}"; do
+    [[ -f "$dest/$f" ]] && continue
+    c_ok "Fetching ${f} (${MASTODON_SETUP_REF})..."
+    curl -fsSL "${RAW_BASE}/${f}" -o "$dest/$f"
+  done
+}
+
 [[ $EUID -eq 0 ]] || die "Run as root inside the LXC."
 mkdir -p "$SETUP_DIR"
+ensure_package_at "$SETUP_DIR"
+chmod +x "$SETUP_DIR/setup.sh"
 
 # State: KEY=value (quoted) lines, sourced on startup. Inputs + PHASE_n_DONE markers.
 # shellcheck source=/dev/null
