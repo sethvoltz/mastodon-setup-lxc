@@ -1,5 +1,9 @@
 server {
-  listen 127.0.0.1:80 default_server;
+  # Sole vhost on :80 inside the LXC (cloudflared -> 127.0.0.1:80). Do not bind only
+  # 127.0.0.1:80 while Debian's stock "listen 80" default site exists — nginx accepts
+  # loopback on the wildcard socket and never consults a loopback-only server block.
+  listen 80 default_server;
+  listen [::]:80 default_server;
   server_name %%WEB_DOMAIN%%;
 
   root /home/mastodon/live/public;
@@ -49,8 +53,6 @@ server {
     tcp_nodelay on;
   }
 
-  # No X-Forwarded-Proto here — Mastodon returns 404 on /health when told the request
-  # is HTTPS but the upstream socket is plain HTTP (loopback health checks).
   location = /health {
     proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;

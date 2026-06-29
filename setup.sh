@@ -58,7 +58,7 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="9"
+SETUP_VERSION="10"
 
 # ===========================================================================
 # Helpers
@@ -302,18 +302,47 @@ install_mastodon_streaming_units() {
 
 configure_nginx_mastodon() {
   [[ -n "${WEB_DOMAIN:-}" ]] || die "WEB_DOMAIN unset — complete Phase 0 first."
+  local f base code
   TOKENS=( [WEB_DOMAIN]="$WEB_DOMAIN" )
   render_template "${SETUP_DIR}/nginx/mastodon" /etc/nginx/sites-available/mastodon
   if [[ -f "${SETUP_DIR}/nginx/streaming-map.conf" ]]; then
     install -m 0644 "${SETUP_DIR}/nginx/streaming-map.conf" /etc/nginx/conf.d/mastodon-streaming-map.conf
   fi
   ln -sf /etc/nginx/sites-available/mastodon /etc/nginx/sites-enabled/mastodon
+  # Stock Debian default uses "listen 80" (wildcard) and wins over "listen 127.0.0.1:80".
   rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
   if [[ -f /etc/nginx/sites-available/default ]]; then
-    mv -f /etc/nginx/sites-available/default /etc/nginx/sites-available/default.disabled-by-mastodon-setup 2>/dev/null || true
+    mv -f /etc/nginx/sites-available/default \
+      /etc/nginx/sites-available/default.disabled-by-mastodon-setup 2>/dev/null || true
   fi
+  for f in /etc/nginx/sites-enabled/*; do
+    [[ -e "$f" ]] || continue
+    base="$(basename "$f")"
+    [[ "$base" == "mastodon" ]] && continue
+    if grep -qE 'listen[[:space:]]+(\[::\]:)?80([[:space:];]|$)' "$f" 2>/dev/null; then
+      rm -f "$f"
+      c_warn "Removed sites-enabled/${base} (conflicting port 80 listener)."
+    fi
+  done
+  for f in /etc/nginx/conf.d/*.conf; do
+    [[ -f "$f" ]] || continue
+    [[ "$(basename "$f")" == "mastodon-streaming-map.conf" ]] && continue
+    if grep -qE 'listen[[:space:]]+(\[::\]:)?80([[:space:];]|$)' "$f" 2>/dev/null \
+       && grep -qE '^[[:space:]]*server[[:space:]]*\{' "$f" 2>/dev/null; then
+      mv -f "$f" "${f}.disabled-by-mastodon-setup"
+      c_warn "Disabled $(basename "$f") (conflicting port 80 server)."
+    fi
+  done
   nginx -t
   systemctl reload nginx
+  code="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${WEB_DOMAIN}" \
+    "http://127.0.0.1:80/health" 2>/dev/null || echo 000)"
+  if [[ "$code" != "200" ]]; then
+    c_err "nginx loopback /health -> ${code} (WEB_DOMAIN=${WEB_DOMAIN})"
+    c_err "Port 80 listeners still loaded:"
+    nginx -T 2>/dev/null | grep -E 'listen|server_name' >&2 || true
+    die "Fix conflicting nginx vhosts, then re-run repair-nginx."
+  fi
 }
 
 # Install Node.js major version from .nvmrc (must run after Mastodon checkout).
