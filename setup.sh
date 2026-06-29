@@ -53,7 +53,7 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="3"
+SETUP_VERSION="4"
 
 # ===========================================================================
 # Helpers
@@ -66,6 +66,66 @@ die()   { c_err "$*"; exit 1; }
 
 # Strip ANSI + CR so rake/colored output still parses.
 strip_ansi() { sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r'; }
+
+# psql as postgres; avoid SSH locale vars (e.g. en_US.UTF-8) before locales are installed.
+pg_sql() {
+  env -u LC_TERMINAL LC_ALL=C.UTF-8 runuser -u postgres -- psql -v ON_ERROR_STOP=1 "$@"
+}
+
+pg_sql_val() {
+  pg_sql -tAc "$1" | tr -d '[:space:]'
+}
+
+ensure_pg_locales() {
+  apt install -y locales
+  if [[ -f /etc/locale.gen ]] && ! locale -a 2>/dev/null | grep -qi 'en_us.utf-8'; then
+    sed -i 's/# \(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen
+    grep -q 'en_US.UTF-8 UTF-8' /etc/locale.gen || echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
+    locale-gen en_US.UTF-8
+  fi
+}
+
+# Minimal LXCs often init Postgres with SQL_ASCII (C locale); Mastodon needs UTF8.
+ensure_pg_utf8_cluster() {
+  local reason="${1:-}" enc
+  enc="$(pg_sql_val "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname='template1'")"
+  if [[ "$enc" == "UTF8" ]]; then
+    c_ok "PostgreSQL cluster encoding is UTF8."
+    return 0
+  fi
+  c_warn "PostgreSQL template1 encoding is '${enc}'${reason:+ ($reason)} — recreating cluster as UTF8."
+  ensure_pg_locales
+  systemctl stop postgresql
+  pg_dropcluster --stop 16 main
+  if locale -a 2>/dev/null | grep -qi 'en_us.utf-8'; then
+    pg_createcluster 16 main --encoding=UTF8 --locale=en_US.UTF-8
+  else
+    pg_createcluster 16 main --encoding=UTF8 --locale=C.UTF-8
+  fi
+  systemctl start postgresql
+  c_ok "PostgreSQL cluster recreated with UTF8."
+}
+
+ensure_mastodon_pg_role() {
+  [[ "$(pg_sql_val "SELECT 1 FROM pg_roles WHERE rolname='mastodon'")" == "1" ]] && return 0
+  pg_sql -c "CREATE USER mastodon CREATEDB;"
+  c_ok "Created postgres role 'mastodon' (CREATEDB)."
+}
+
+ensure_mastodon_db() {
+  local db="mastodon_production" enc
+  enc="$(pg_sql_val "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname='${db}'")"
+  if [[ -n "$enc" ]]; then
+    if [[ "$enc" == "UTF8" ]]; then
+      c_ok "Database ${db} already exists (UTF8)."
+      return 0
+    fi
+    c_warn "Database ${db} has encoding ${enc}; dropping and recreating as UTF8."
+    pg_sql -c "DROP DATABASE ${db};"
+  fi
+  pg_sql -c "CREATE DATABASE ${db} OWNER mastodon ENCODING 'UTF8' TEMPLATE template0;"
+  c_ok "Created ${db} (UTF8, template0)."
+}
 
 # Parse KEY=value from db:encryption:init (ACTIVE_RECORD_ENCRYPTION_*= lines).
 parse_env_key() {
@@ -351,33 +411,8 @@ if is_done 2; then c_warn "Phase 2 done — skipping."; else
   fi
   apt install -y postgresql-16
   systemctl enable --now postgresql
-  # Minimal LXCs often init Postgres with SQL_ASCII (C locale); Mastodon needs UTF8.
-  PG_ENC="$(runuser -u postgres -- psql -tAc "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname='template1'" | tr -d '[:space:]')"
-  if [[ "$PG_ENC" != "UTF8" ]]; then
-    c_warn "PostgreSQL template1 encoding is '${PG_ENC}' — recreating cluster as UTF8."
-    apt install -y locales
-    if [[ -f /etc/locale.gen ]] && ! locale -a 2>/dev/null | grep -qi 'en_us.utf-8'; then
-      sed -i 's/# \(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen
-      grep -q 'en_US.UTF-8 UTF-8' /etc/locale.gen || echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
-      locale-gen en_US.UTF-8
-    fi
-    systemctl stop postgresql
-    pg_dropcluster --stop 16 main
-    if locale -a 2>/dev/null | grep -qi 'en_us.utf-8'; then
-      pg_createcluster 16 main --encoding=UTF8 --locale=en_US.UTF-8
-    else
-      pg_createcluster 16 main --encoding=UTF8 --locale=C.UTF-8
-    fi
-    systemctl start postgresql
-    c_ok "PostgreSQL cluster recreated with UTF8."
-  else
-    c_ok "PostgreSQL cluster encoding is UTF8."
-  fi
-  # Role with CREATEDB + peer auth (no password); db:setup (Phase 7) creates the DB.
-  if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='mastodon'" | grep -q 1; then
-    runuser -u postgres -- psql -c "CREATE USER mastodon CREATEDB;"
-    c_ok "Created postgres role 'mastodon' (CREATEDB)."
-  fi
+  ensure_pg_utf8_cluster
+  ensure_mastodon_pg_role
   mark_done 2
 fi
 
@@ -628,13 +663,11 @@ fi
 # ===========================================================================
 if is_done 7; then c_warn "Phase 7 done — skipping."; else
   c_hdr "Phase 7: Database setup"
-  # template1 may be SQL_ASCII on minimal images — create UTF8 DB from template0.
-  if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='mastodon_production'" | grep -q 1; then
-    runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c \
-      "CREATE DATABASE mastodon_production OWNER mastodon ENCODING 'UTF8' TEMPLATE template0;"
-    c_ok "Created mastodon_production (UTF8, template0)."
-  fi
-  m_run "RAILS_ENV=production bundle exec rails db:setup"
+  # Phase 2 may have been marked done before the UTF8 cluster fix existed.
+  ensure_pg_utf8_cluster "Phase 2 was skipped on a SQL_ASCII cluster"
+  ensure_mastodon_pg_role
+  ensure_mastodon_db
+  m_run "RAILS_ENV=production bundle exec rails db:schema:load db:seed"
   c_ok "Database created, schema loaded, seeded."
   mark_done 7
 fi
