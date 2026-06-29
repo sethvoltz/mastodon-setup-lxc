@@ -12,6 +12,9 @@
 # Run without a local package (fetches templates from GitHub):
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh)"
 #
+# Reapply only the nginx mastodon vhost (after editing WEB_DOMAIN, etc.):
+#   /root/mastodon-setup/setup.sh repair-nginx
+#
 set -euo pipefail
 
 # ===========================================================================
@@ -54,7 +57,7 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="6"
+SETUP_VERSION="7"
 
 # ===========================================================================
 # Helpers
@@ -380,6 +383,24 @@ cf_dns_upsert() {       # cf_dns_upsert ZONE_ID FQDN TARGET  (proxied CNAME, ups
     cf_api POST "/zones/${zone}/dns_records" "$data" >/dev/null
   fi
 }
+
+  systemctl reload nginx
+}
+
+# ===========================================================================
+# Optional subcommands (run before install phases)
+# ===========================================================================
+if [[ "${1:-}" == "repair-nginx" ]]; then
+  configure_nginx_mastodon
+  code="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${WEB_DOMAIN}" "http://127.0.0.1:80/health" 2>/dev/null || echo 000)"
+  if [[ "$code" == "200" ]]; then
+    c_ok "nginx loopback /health -> ${code} (WEB_DOMAIN=${WEB_DOMAIN})"
+  else
+    c_err "nginx loopback /health -> ${code} (WEB_DOMAIN=${WEB_DOMAIN})"
+    exit 1
+  fi
+  exit 0
+fi
 
 # ===========================================================================
 # Phase 0: Collect inputs
