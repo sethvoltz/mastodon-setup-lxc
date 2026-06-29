@@ -85,13 +85,13 @@ ensure_pg_locales() {
 
 # Minimal LXCs often init Postgres with SQL_ASCII (C locale); Mastodon needs UTF8.
 ensure_pg_utf8_cluster() {
-  local reason="${1:-}" enc
+  local enc
   enc="$(pg_sql_val "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname='template1'")"
   if [[ "$enc" == "UTF8" ]]; then
     c_ok "PostgreSQL cluster encoding is UTF8."
     return 0
   fi
-  c_warn "PostgreSQL template1 encoding is '${enc}'${reason:+ ($reason)} — recreating cluster as UTF8."
+  c_warn "PostgreSQL template1 encoding is '${enc}' — recreating cluster as UTF8."
   ensure_pg_locales
   systemctl stop postgresql
   pg_dropcluster --stop 16 main
