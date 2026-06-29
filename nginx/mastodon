@@ -1,18 +1,9 @@
 server {
-  # Sole vhost on :80 inside the LXC (cloudflared -> 127.0.0.1:80). Do not bind only
-  # 127.0.0.1:80 while Debian's stock "listen 80" default site exists — nginx accepts
-  # loopback on the wildcard socket and never consults a loopback-only server block.
   listen 80 default_server;
   listen [::]:80 default_server;
   server_name %%WEB_DOMAIN%%;
 
   root /home/mastodon/live/public;
-
-  # Real client IP from Cloudflare when present (tunnel); $remote_addr on loopback.
-  proxy_set_header Host $host;
-  proxy_set_header X-Real-IP $mastodon_client_ip;
-  proxy_set_header X-Forwarded-For $mastodon_client_ip;
-  proxy_set_header X-Forwarded-Proto https;
 
   client_max_body_size 100m;
   keepalive_timeout 70;
@@ -27,25 +18,29 @@ server {
     try_files $uri @proxy;
   }
 
+  # Any proxy_set_header here overrides server-level headers — set the full set.
   location @proxy {
     proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $mastodon_client_ip;
+    proxy_set_header X-Forwarded-For $mastodon_client_ip;
+    proxy_set_header X-Forwarded-Proto https;
     proxy_set_header Connection "";
     proxy_read_timeout 120s;
     proxy_send_timeout 120s;
   }
 
   location /api/v1/streaming {
+    proxy_pass http://127.0.0.1:4000;
+    proxy_buffering off;
+    proxy_redirect off;
+    proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $mastodon_client_ip;
     proxy_set_header X-Forwarded-For $mastodon_client_ip;
     proxy_set_header X-Forwarded-Proto https;
     proxy_set_header Proxy "";
-
-    proxy_pass http://127.0.0.1:4000;
-    proxy_buffering off;
-    proxy_redirect off;
-    proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;
     proxy_read_timeout 3600s;
@@ -57,5 +52,8 @@ server {
     proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $mastodon_client_ip;
+    proxy_set_header X-Forwarded-For $mastodon_client_ip;
+    proxy_set_header X-Forwarded-Proto https;
   }
 }
