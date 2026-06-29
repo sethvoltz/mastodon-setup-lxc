@@ -87,10 +87,12 @@ ensure_package_at() {
   package_complete "$dest" && return 0
   command -v curl >/dev/null || die "curl required to fetch the setup package from GitHub."
   mkdir -p "$dest/garage" "$dest/systemd" "$dest/nginx" "$dest/cloudflared"
+  local raw_base="$RAW_BASE"
+  [[ -n "${MASTODON_SETUP_SHA:-}" ]] && raw_base="https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${MASTODON_SETUP_SHA}"
   for f in "${PACKAGE_FILES[@]}"; do
     [[ -f "$dest/$f" ]] && continue
     c_ok "Fetching ${f} (${MASTODON_SETUP_REF})..."
-    curl -fsSL "${RAW_BASE}/${f}" -o "$dest/$f"
+    curl -fsSL "${raw_base}/${f}" -o "$dest/$f"
   done
 }
 
@@ -103,10 +105,41 @@ ensure_curl() {
   apt-get install -y curl ca-certificates
 }
 
+read_setup_version() {
+  grep -m1 '^SETUP_VERSION=' "$1" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/'
+}
+
+# raw.githubusercontent.com caches branch refs; resolve commit SHA via API for a fresh copy.
+resolve_ref_sha() {
+  local ref="$1" sha
+  sha="$(curl -fsSL "https://api.github.com/repos/${MASTODON_SETUP_REPO}/commits/${ref}" \
+    | sed -n 's/.*"sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -1)"
+  [[ -n "$sha" ]] || die "Could not resolve Git ref ${ref} on GitHub."
+  printf '%s' "$sha"
+}
+
+# Upgrade when curl served a stale branch copy (common right after a push).
+ensure_setup_script_current() {
+  local dest="$SETUP_DIR/setup.sh" tmp="${SETUP_DIR}/.setup.sh-new" sha remote_ver
+  sha="$(resolve_ref_sha "$MASTODON_SETUP_REF")"
+  MASTODON_SETUP_SHA="$sha"
+  curl -fsSL "https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${sha}/setup.sh" -o "$tmp" \
+    || { rm -f "$tmp"; return 0; }
+  remote_ver="$(read_setup_version "$tmp")"
+  if [[ "$remote_ver" =~ ^[0-9]+$ && "$SETUP_VERSION" =~ ^[0-9]+$ && remote_ver -gt SETUP_VERSION ]]; then
+    chmod +x "$tmp"
+    mv "$tmp" "$dest"
+    c_ok "Updated setup.sh v${SETUP_VERSION} -> v${remote_ver} (${MASTODON_SETUP_REF}@${sha:0:7})"
+    exec "$dest" "$@"
+  fi
+  rm -f "$tmp"
+}
+
 [[ $EUID -eq 0 ]] || die "Run as root inside the LXC."
 ensure_curl
 mkdir -p "$SETUP_DIR"
-c_ok "setup.sh v${SETUP_VERSION} (package ref ${MASTODON_SETUP_REF})"
+ensure_setup_script_current "$@"
+c_ok "setup.sh v${SETUP_VERSION} (package ref ${MASTODON_SETUP_REF}${MASTODON_SETUP_SHA:+ @${MASTODON_SETUP_SHA:0:7}})"
 ensure_package_at "$SETUP_DIR"
 chmod +x "$SETUP_DIR/setup.sh"
 
