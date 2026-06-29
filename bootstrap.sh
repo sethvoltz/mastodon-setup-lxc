@@ -87,6 +87,13 @@ prompt() {
   printf -v "$__var" '%s' "$__ans"
 }
 
+# prompt_optional VAR "Question" — Enter accepts empty (e.g. DHCP).
+prompt_optional() {
+  local __var="$1" __q="$2" __ans
+  read -r -p "$__q: " __ans || true
+  printf -v "$__var" '%s' "$__ans"
+}
+
 [[ $EUID -eq 0 ]] || die "Must run as root on the PVE host."
 command -v pct >/dev/null     || die "pct not found — is this a Proxmox VE node?"
 command -v pvesm >/dev/null   || die "pvesm not found — is this a Proxmox VE node?"
@@ -106,8 +113,8 @@ prompt ROOTFS_STORAGE  "Rootfs storage pool (RBD)"        "ceph"
 prompt CEPHFS_STORAGE  "CephFS storage name"              "cephfs"
 prompt GARAGE_SIZE     "Garage data size / CephFS quota"  "100G"
 prompt BRIDGE          "Network bridge"                   "vmbr0"
-prompt IP_CIDR         "Container IP (CIDR, blank for DHCP)" ""
-prompt GATEWAY         "Gateway IP (static IP only)"       ""
+prompt_optional IP_CIDR  "Container IP (CIDR, Enter for DHCP)"
+prompt_optional GATEWAY  "Gateway IP (static IP only, Enter to skip)"
 
 ROOT_DISK_GB="${ROOT_DISK%[Gg]*}"   # 20G -> 20 (pct --rootfs wants GiB integer)
 [[ "$ROOT_DISK_GB" =~ ^[0-9]+$ ]] || die "Root disk size must look like '20G'."

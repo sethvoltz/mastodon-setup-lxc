@@ -89,7 +89,7 @@ chmod +x bootstrap.sh
 
 Pin a branch, tag, or commit by exporting `MASTODON_SETUP_REF` before either command (e.g. `export MASTODON_SETUP_REF=v1.0.0`). **Push your chosen ref to GitHub before using the curl one-liner** — it fetches from the remote, not your local tree.
 
-It prompts for the container ID, hostname, resources (default **40 GB** root disk), storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. Leave the IP blank to use **DHCP**. It then creates the LXC, attaches the CephFS bind mount, starts the container, and copies `setup.sh` + templates to `/root/mastodon-setup/` inside it.
+It prompts for the container ID, hostname, resources (default **40 GB** root disk), storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. Press **Enter** at the IP prompt to use **DHCP**. It then creates the LXC, attaches the CephFS bind mount, starts the container, and copies `setup.sh` + templates to `/root/mastodon-setup/` inside it.
 
 ---
 
