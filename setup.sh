@@ -42,7 +42,6 @@ MASTODON_HOME="/home/mastodon"
 LIVE="${MASTODON_HOME}/live"
 GARAGE_DATA="/mnt/garage-data"
 export GARAGE_CONFIG_FILE="/etc/garage/garage.toml"   # used by the garage CLI
-GARAGE="/usr/local/bin/garage"
 export PATH="/usr/local/bin:${PATH}"
 
 # Garage release to install. Bump GARAGE_VERSION as new stable releases land.
