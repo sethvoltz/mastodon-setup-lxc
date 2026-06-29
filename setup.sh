@@ -12,12 +12,6 @@
 # Run without a local package (fetches templates from GitHub):
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh)"
 #
-# Reapply only the nginx mastodon vhost (after editing WEB_DOMAIN, etc.):
-#   /root/mastodon-setup/setup.sh repair-nginx
-#
-# Start the real streaming unit (Mastodon 4.3+ shim fix):
-#   /root/mastodon-setup/setup.sh repair-streaming
-#
 set -euo pipefail
 
 # ===========================================================================
@@ -58,7 +52,6 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="12"
 
 # ===========================================================================
 # Helpers
@@ -146,30 +139,17 @@ package_complete() {
   done
 }
 
-# Fetch templates from GitHub; re-fetch all when the resolved commit SHA changes.
+# Fetch templates from GitHub when the on-disk package is incomplete.
 ensure_package_at() {
-  local dest="$1" f sha stored raw_base refresh=0
+  local dest="$1" f raw_base
   command -v curl >/dev/null || die "curl required to fetch the setup package from GitHub."
   mkdir -p "$dest/garage" "$dest/systemd" "$dest/nginx" "$dest/cloudflared"
-  sha="${MASTODON_SETUP_SHA:-}"
-  if [[ -z "$sha" ]]; then
-    sha="$(resolve_ref_sha "$MASTODON_SETUP_REF")"
-    MASTODON_SETUP_SHA="$sha"
-  fi
-  stored=""
-  [[ -f "${dest}/.package-sha" ]] && stored="$(<"${dest}/.package-sha")"
-  package_complete "$dest" || refresh=1
-  [[ "$stored" == "$sha" ]] || refresh=1
-  if [[ "$refresh" -eq 0 ]]; then
-    return 0
-  fi
-  raw_base="https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${sha}"
+  package_complete "$dest" && return 0
+  raw_base="https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${MASTODON_SETUP_REF}"
   for f in "${PACKAGE_FILES[@]}"; do
-    [[ "$f" == "setup.sh" ]] && continue
-    c_ok "Fetching ${f} (${MASTODON_SETUP_REF}@${sha:0:7})..."
+    c_ok "Fetching ${f} (${MASTODON_SETUP_REF})..."
     curl -fsSL "${raw_base}/${f}" -o "$dest/$f"
   done
-  printf '%s' "$sha" > "${dest}/.package-sha"
 }
 
 # Bare Debian LXC may not have curl yet; install it before we fetch templates.
@@ -181,51 +161,12 @@ ensure_curl() {
   apt-get install -y curl ca-certificates
 }
 
-read_setup_version() {
-  grep -m1 '^SETUP_VERSION=' "$1" 2>/dev/null | sed 's/.*"\([^"]*\)".*/\1/'
-}
-
-# raw.githubusercontent.com caches branch refs; resolve commit SHA via API for a fresh copy.
-resolve_ref_sha() {
-  local ref="$1" sha
-  sha="$(curl -fsSL "https://api.github.com/repos/${MASTODON_SETUP_REPO}/commits/${ref}" \
-    | sed -n 's/.*"sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -1)"
-  [[ -n "$sha" ]] || die "Could not resolve Git ref ${ref} on GitHub."
-  printf '%s' "$sha"
-}
-
-# Upgrade when curl served a stale branch copy (common right after a push).
-ensure_setup_script_current() {
-  local dest="$SETUP_DIR/setup.sh" tmp="${SETUP_DIR}/.setup.sh-new" sha remote_ver
-  sha="$(resolve_ref_sha "$MASTODON_SETUP_REF")"
-  MASTODON_SETUP_SHA="$sha"
-  curl -fsSL "https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${sha}/setup.sh" -o "$tmp" \
-    || { rm -f "$tmp"; return 0; }
-  remote_ver="$(read_setup_version "$tmp")"
-  if [[ "$remote_ver" =~ ^[0-9]+$ && "$SETUP_VERSION" =~ ^[0-9]+$ ]]; then
-    if (( remote_ver > SETUP_VERSION )); then
-      chmod +x "$tmp"
-      mv "$tmp" "$dest"
-      c_ok "Updated setup.sh v${SETUP_VERSION} -> v${remote_ver} (${MASTODON_SETUP_REF}@${sha:0:7})"
-      exec "$dest" "$@"
-    elif (( remote_ver == SETUP_VERSION )); then
-      chmod +x "$tmp"
-      mv "$tmp" "$dest"
-    else
-      rm -f "$tmp"
-    fi
-  else
-    rm -f "$tmp"
-  fi
-}
-
 [[ $EUID -eq 0 ]] || die "Run as root inside the LXC."
 ensure_curl
 mkdir -p "$SETUP_DIR"
-ensure_setup_script_current "$@"
-c_ok "setup.sh v${SETUP_VERSION} (package ref ${MASTODON_SETUP_REF}${MASTODON_SETUP_SHA:+ @${MASTODON_SETUP_SHA:0:7}})"
 ensure_package_at "$SETUP_DIR"
 chmod +x "$SETUP_DIR/setup.sh"
+c_ok "mastodon-setup (${MASTODON_SETUP_REF})"
 
 # State: KEY=value (quoted) lines, sourced on startup. Inputs + PHASE_n_DONE markers.
 # shellcheck source=/dev/null
@@ -288,6 +229,42 @@ m_run() {
   runuser -l mastodon -c "export PATH=\$HOME/.rbenv/bin:\$HOME/.rbenv/shims:\$PATH; export COREPACK_ENABLE_DOWNLOAD_PROMPT=0; cd $LIVE && $*"
 }
 
+install_tootctl_wrapper() {
+  install -m 0755 /dev/stdin /usr/local/bin/tootctl <<'EOF'
+#!/usr/bin/env bash
+if [[ ${EUID} -eq 0 ]]; then
+  exec runuser -u mastodon -- bash -lc \
+    'export PATH="$HOME/.rbenv/bin:$HOME/.rbenv/shims:$PATH"; cd /home/mastodon/live && RAILS_ENV=production bin/tootctl "$@"' \
+    _ "$@"
+fi
+export PATH="${HOME}/.rbenv/bin:${HOME}/.rbenv/shims:${PATH}"
+cd /home/mastodon/live && exec env RAILS_ENV=production bin/tootctl "$@"
+EOF
+}
+
+# pct enter gives a non-login root shell (reads .bashrc, not profile.d). Install both.
+install_admin_shell_env() {
+  local marker='mastodon-setup admin environment'
+  install -m 0644 /dev/stdin /etc/profile.d/mastodon-setup.sh <<'EOF'
+# Mastodon LXC setup — admin shell environment (Garage CLI, install inputs).
+export PATH="/usr/local/bin:${PATH}"
+export GARAGE_CONFIG_FILE=/etc/garage/garage.toml
+
+mastodon-env() {
+  # shellcheck disable=SC1091
+  [[ -r /root/mastodon-setup/.install-state ]] && source /root/mastodon-setup/.install-state
+}
+EOF
+  if ! grep -qF "$marker" /root/.bashrc 2>/dev/null; then
+    cat >> /root/.bashrc <<EOF
+
+# $marker
+. /etc/profile.d/mastodon-setup.sh
+EOF
+    c_ok "Admin shell env -> /etc/profile.d/mastodon-setup.sh (sourced from /root/.bashrc)."
+  fi
+}
+
 # Mastodon 4.3+ ships mastodon-streaming.service as a oneshot shim; the real Node
 # process is mastodon-streaming@4000. Install both and start the template instance.
 install_mastodon_streaming_units() {
@@ -345,7 +322,7 @@ configure_nginx_mastodon() {
     c_err "nginx loopback /health -> ${code} (WEB_DOMAIN=${WEB_DOMAIN})"
     c_err "Port 80 listeners still loaded:"
     nginx -T 2>/dev/null | grep -E 'listen|server_name' >&2 || true
-    die "Fix conflicting nginx vhosts, then re-run repair-nginx."
+    die "Fix conflicting nginx vhosts on port 80, then re-run setup.sh."
   fi
 }
 
@@ -430,44 +407,10 @@ cf_dns_upsert() {       # cf_dns_upsert ZONE_ID FQDN TARGET  (proxied CNAME, ups
 }
 
 # ===========================================================================
-# Optional subcommands (run before install phases)
-# ===========================================================================
-if [[ "${1:-}" == "repair-nginx" ]]; then
-  configure_nginx_mastodon
-  code="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${WEB_DOMAIN}" "http://127.0.0.1:80/health" 2>/dev/null || echo 000)"
-  if [[ "$code" == "200" ]]; then
-    c_ok "nginx loopback /health -> ${code} (WEB_DOMAIN=${WEB_DOMAIN})"
-  else
-    c_err "nginx loopback /health -> ${code} (WEB_DOMAIN=${WEB_DOMAIN})"
-    exit 1
-  fi
-  exit 0
-fi
-
-if [[ "${1:-}" == "repair-streaming" ]]; then
-  [[ -f "${LIVE}/dist/mastodon-streaming@.service" ]] \
-    || die "No mastodon-streaming@.service in ${LIVE}/dist/ — complete Phase 3 first."
-  STREAMING_UNIT="$(install_mastodon_streaming_units)"
-  code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:4000/api/v1/streaming/health" 2>/dev/null || echo 000)"
-  if [[ "$code" == "200" ]]; then
-    c_ok "streaming /health -> ${code} (${STREAMING_UNIT})"
-  else
-    c_err "streaming /health -> ${code} (${STREAMING_UNIT}); journalctl -u ${STREAMING_UNIT} -n 30"
-    exit 1
-  fi
-  exit 0
-fi
-
-if [[ "${1:-}" == "repair-approve-owner" ]]; then
-  [[ -n "${MASTODON_USERNAME:-}" ]] || die "MASTODON_USERNAME unset — complete Phase 0 first."
-  m_run "RAILS_ENV=production bin/tootctl accounts modify ${MASTODON_USERNAME} --approve"
-  c_ok "Approved owner account '${MASTODON_USERNAME}'."
-  exit 0
-fi
-
-# ===========================================================================
 # Phase 0: Collect inputs
 # ===========================================================================
+[[ -x /usr/local/bin/tootctl ]] || { install_tootctl_wrapper; c_ok "tootctl -> /usr/local/bin/tootctl (run as root after pct enter)."; }
+install_admin_shell_env
 if is_done 0; then c_warn "Phase 0 done — skipping input collection."; else
   c_hdr "Phase 0: Collect inputs"
   need WEB_DOMAIN          "Mastodon web domain (full hostname, e.g. example.com or social.example.com)"
@@ -537,16 +480,7 @@ fi
 # ===========================================================================
 # Phase 3: Ruby via rbenv + Mastodon checkout
 # ===========================================================================
-PHASE3_SKIP=0
-if is_done 3; then
-  if [[ -f "${LIVE}/.ruby-version" ]]; then
-    c_warn "Phase 3 done — skipping."
-    PHASE3_SKIP=1
-  else
-    c_warn "Stale Phase 3 marker — re-running Mastodon checkout (Phase 3 now runs before Node.js)."
-  fi
-fi
-if [[ "$PHASE3_SKIP" -eq 0 ]]; then
+if is_done 3; then c_warn "Phase 3 done — skipping."; else
   c_hdr "Phase 3: Ruby via rbenv + Mastodon checkout"
   id mastodon &>/dev/null || adduser --disabled-password --gecos "" mastodon
   chmod o+x "${MASTODON_HOME}"   # nginx (www-data) must traverse to serve /public assets
@@ -586,19 +520,7 @@ fi
 # ===========================================================================
 # Phase 4: Node.js (after checkout — reads .nvmrc from the Mastodon tree)
 # ===========================================================================
-PHASE4_SKIP=0
-if is_done 4; then
-  NODE_WANT="$(tr -dc '0-9.' < "${LIVE}/.nvmrc" 2>/dev/null | cut -d. -f1)"
-  NODE_WANT="${NODE_WANT:-$NODE_MAJOR_DEFAULT}"
-  NODE_HAVE="$(node -v 2>/dev/null | tr -dc '0-9.' | cut -d. -f1)"
-  if [[ -n "$NODE_HAVE" && "$NODE_HAVE" == "$NODE_WANT" ]]; then
-    c_warn "Phase 4 done — skipping."
-    PHASE4_SKIP=1
-  else
-    c_warn "Phase 4 marker set but Node ${NODE_HAVE:-none} != required ${NODE_WANT} — re-installing."
-  fi
-fi
-if [[ "$PHASE4_SKIP" -eq 0 ]]; then
+if is_done 4; then c_warn "Phase 4 done — skipping."; else
   c_hdr "Phase 4: Node.js"
   [[ -f "${LIVE}/.nvmrc" ]] || die "Mastodon checkout missing ${LIVE}/.nvmrc — complete Phase 3 first."
   install_nodejs
@@ -737,10 +659,6 @@ if is_done 6; then c_warn "Phase 6 done — skipping."; else
     AR_PRIMARY="$(parse_env_key "$ENC_OUT" ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY)"
     AR_DETERMINISTIC="$(parse_env_key "$ENC_OUT" ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY)"
     AR_SALT="$(parse_env_key "$ENC_OUT" ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT)"
-    # Legacy rake output (primary_key: …) — kept for older Mastodon tags.
-    [[ -n "$AR_PRIMARY" ]]       || AR_PRIMARY="$(printf '%s' "$ENC_OUT" | strip_ansi | awk -F': ' '/primary_key:/{gsub(/ /,"",$2); print $2; exit}')"
-    [[ -n "$AR_DETERMINISTIC" ]] || AR_DETERMINISTIC="$(printf '%s' "$ENC_OUT" | strip_ansi | awk -F': ' '/deterministic_key:/{gsub(/ /,"",$2); print $2; exit}')"
-    [[ -n "$AR_SALT" ]]          || AR_SALT="$(printf '%s' "$ENC_OUT" | strip_ansi | awk -F': ' '/key_derivation_salt:/{gsub(/ /,"",$2); print $2; exit}')"
     if [[ -z "$AR_PRIMARY" || -z "$AR_DETERMINISTIC" || -z "$AR_SALT" ]]; then
       c_err "db:encryption:init output was:"
       printf '%s\n' "$ENC_OUT" >&2
@@ -781,8 +699,6 @@ fi
 # ===========================================================================
 if is_done 7; then c_warn "Phase 7 done — skipping."; else
   c_hdr "Phase 7: Database setup"
-  # Phase 2 may have been marked done before the UTF8 cluster fix existed.
-  ensure_pg_utf8_cluster "Phase 2 was skipped on a SQL_ASCII cluster"
   ensure_mastodon_pg_role
   ensure_mastodon_db
   m_run "RAILS_ENV=production bundle exec rails db:schema:load db:seed"
@@ -808,17 +724,7 @@ if is_done 9; then c_warn "Phase 9 done — skipping."; else
   for u in mastodon-web mastodon-sidekiq; do
     install -m 0644 "${LIVE}/dist/${u}.service" "/etc/systemd/system/${u}.service"
   done
-  if [[ -f "${LIVE}/dist/mastodon-streaming@.service" ]]; then
-    STREAMING_UNIT="$(install_mastodon_streaming_units)"
-  elif [[ -f "${LIVE}/dist/mastodon-streaming.service" ]]; then
-    install -m 0644 "${LIVE}/dist/mastodon-streaming.service" /etc/systemd/system/mastodon-streaming.service
-    STREAMING_UNIT="mastodon-streaming"
-    state_put STREAMING_UNIT "$STREAMING_UNIT"
-    systemctl daemon-reload
-    systemctl enable --now "$STREAMING_UNIT"
-  else
-    die "No streaming unit found in ${LIVE}/dist/."
-  fi
+  STREAMING_UNIT="$(install_mastodon_streaming_units)"
   systemctl enable --now mastodon-web mastodon-sidekiq
   c_ok "Started mastodon-web, mastodon-sidekiq, ${STREAMING_UNIT}."
   mark_done 9
@@ -939,15 +845,6 @@ fi
 # Phase 14: Final health check
 # ===========================================================================
 c_hdr "Phase 14: Final health check"
-# Repair common post-upgrade gaps when phases 9/10 were marked done earlier.
-if [[ -f "${LIVE}/dist/mastodon-streaming@.service" ]]; then
-  if ! systemctl is-active --quiet mastodon-streaming@4000 2>/dev/null; then
-    c_warn "mastodon-streaming@4000 not active — installing template unit and starting."
-    STREAMING_UNIT="$(install_mastodon_streaming_units)"
-  fi
-fi
-c_ok "Reapplying nginx mastodon vhost (WEB_DOMAIN=${WEB_DOMAIN})."
-configure_nginx_mastodon
 STREAMING_UNIT="${STREAMING_UNIT:-mastodon-streaming@4000}"
 declare -a RESULTS=()
 check_unit() {

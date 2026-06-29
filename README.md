@@ -76,14 +76,13 @@ Complete all of these **before** running any script.
 
 ## 2. Run `bootstrap.sh` on the PVE host
 
-**Without cloning** (fetches from GitHub `main`; cache-bust query avoids stale CDN copies):
+**Without cloning** (fetches from GitHub `main`):
 
 ```bash
-bash -c "$(curl -fsSL -H 'Cache-Control: no-cache' \
-  "https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/bootstrap.sh?$(date +%s)")"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/bootstrap.sh)"
 ```
 
-You should see `bootstrap.sh v6` near the top of the run. If the IP prompt says **blank for DHCP** or lacks a **`[dhcp]`** default, you have an old copy — re-run with the command above, pin a commit SHA in the URL, or use a git checkout.
+You should see `bootstrap.sh v7` near the top of the run.
 
 Or from a checkout on the PVE node:
 ```bash
@@ -103,8 +102,7 @@ From a **bare container** (recommended — bootstrap installs `curl` first; same
 
 ```bash
 pct enter <CTID>
-bash -c "$(curl -fsSL -H 'Cache-Control: no-cache' \
-  "https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh?$(date +%s)")"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh)"
 ```
 
 **Already have a container without curl?** From the PVE host (no console login needed):
@@ -163,7 +161,7 @@ git fetch --tags
 4. `git checkout <new-tag>`, then `bundle install` and `yarn install --immutable`.
 5. Pre-deployment migrations: `SKIP_POST_DEPLOYMENT_MIGRATIONS=true RAILS_ENV=production bundle exec rails db:migrate`.
 6. `RAILS_ENV=production bundle exec rails assets:precompile`.
-7. Restart: `systemctl reload mastodon-web` (zero-downtime) and `systemctl restart mastodon-sidekiq mastodon-streaming` (restart streaming explicitly when its code changed).
+7. Restart: `systemctl reload mastodon-web` (zero-downtime) and `systemctl restart mastodon-sidekiq mastodon-streaming@4000` (restart streaming explicitly when its code changed).
 8. Post-deployment migrations: `RAILS_ENV=production bundle exec rails db:migrate` (a second run, after the restart).
 
 ---
@@ -174,8 +172,7 @@ git fetch --tags
 2. Wait for federation to propagate (can take hours).
 3. The transferred account arrives as a **regular user**. Elevate it:
    ```bash
-   cd /home/mastodon/live
-   sudo -u mastodon RAILS_ENV=production bin/tootctl accounts modify <username> --role Owner
+   tootctl accounts modify <username> --role Owner
    ```
 4. Delete the bootstrap admin account via **Admin → Accounts** in the web UI.
 
@@ -196,8 +193,8 @@ systemctl is-active mastodon-web        # prints "active" or "failed"
 ```
 Check all at once:
 ```bash
-for u in postgresql redis-server nginx mastodon-web mastodon-sidekiq mastodon-streaming garage cloudflared; do
-  printf '%-22s %s\n' "$u" "$(systemctl is-active "$u")"
+for u in postgresql redis-server nginx mastodon-web mastodon-sidekiq mastodon-streaming@4000 garage cloudflared; do
+  printf '%-26s %s\n' "$u" "$(systemctl is-active "$u")"
 done
 ```
 Restart / reload:
@@ -205,7 +202,6 @@ Restart / reload:
 systemctl restart mastodon-sidekiq      # full restart
 systemctl reload nginx                  # reload config without dropping connections
 ```
-> If your streaming unit is templated, it is `mastodon-streaming@4000` instead of `mastodon-streaming`.
 
 ### Logs (journald)
 ```bash
@@ -219,19 +215,10 @@ Healthy logs are steady request/job lines. Trouble looks like repeated Ruby back
 ```bash
 curl -fsS http://127.0.0.1:3000/health                       # web    -> "OK"
 curl -fsS http://127.0.0.1:4000/api/v1/streaming/health      # stream -> "OK"
-source /root/mastodon-setup/.install-state
+mastodon-env   # loads WEB_DOMAIN, MEDIA_DOMAIN, … from .install-state
 curl -s -o /dev/null -w '%{http_code}\n' -H "Host: ${WEB_DOMAIN}" http://127.0.0.1:80/health   # nginx -> 200
 ```
 `200` / `OK` = good. `Connection refused` = the service behind it is down (check `systemctl`/`journalctl`). `502/504` = nginx is up but the app behind it isn't answering.
-
-**One-shot repairs** (safe; load state via `source`, no fragile quoting):
-
-```bash
-source /root/mastodon-setup/.install-state
-/root/mastodon-setup/setup.sh repair-nginx       # default site still serving? loopback /health 404?
-/root/mastodon-setup/setup.sh repair-streaming   # mastodon-streaming active but :4000 down?
-/root/mastodon-setup/setup.sh repair-approve-owner  # owner stuck "under review"?
-```
 
 ### PostgreSQL
 ```bash
@@ -246,6 +233,8 @@ redis-cli ping                          # -> PONG
 ```
 
 ### Garage (object storage)
+`garage` needs `GARAGE_CONFIG_FILE`; setup installs `/etc/profile.d/mastodon-setup.sh` and sources it from `/root/.bashrc` so `pct enter` shells work immediately. If you are already in a session from before setup ran, run `. /etc/profile.d/mastodon-setup.sh` once.
+
 ```bash
 garage status                           # node should be listed and "Up"
 garage stats                            # data/metadata sizes, object counts
@@ -290,7 +279,7 @@ garage stats                     # object counts and sizes
 ```
 Run the prune on demand:
 ```bash
-cd /home/mastodon/live && sudo -u mastodon RAILS_ENV=production bin/tootctl media remove --days=28
+tootctl media remove --days=28
 ```
 If usage approaches the 100 GB cap, raise the quota from the **PVE host**:
 ```bash
@@ -298,16 +287,12 @@ setfattr -n ceph.quota.max_bytes -v 161061273600 /mnt/pve/cephfs/ct-<CTID>-garag
 ```
 
 ### tootctl (Mastodon admin CLI)
-Run it as the `mastodon` user from the live dir:
+After `pct enter <CTID>`, run `tootctl` directly as root — a wrapper at `/usr/local/bin/tootctl` runs commands as the `mastodon` user with the right Ruby path and `RAILS_ENV=production`.
+
 ```bash
-cd /home/mastodon/live
-sudo -u mastodon RAILS_ENV=production bin/tootctl <command>
-```
-Useful read-only commands:
-```bash
-sudo -u mastodon RAILS_ENV=production bin/tootctl accounts modify --help
-sudo -u mastodon RAILS_ENV=production bin/tootctl media usage
-sudo -u mastodon RAILS_ENV=production bin/tootctl feeds build --help
+tootctl accounts modify --help
+tootctl media usage
+tootctl feeds build --help
 ```
 > Some `tootctl` commands are destructive (e.g. `self-destruct`, `accounts delete`). Read `--help` before running anything that isn't clearly read-only.
 
@@ -350,12 +335,11 @@ You can re-run the installer at any time to reprint the Phase 14 pass/fail table
 
 | Symptom | Check |
 |---------|-------|
-| Owner account stuck "under review" | `/root/mastodon-setup/setup.sh repair-approve-owner` (Mastodon requires explicit approval even for Owner) |
-| nginx welcome page or loopback `/health` 404 | `/root/mastodon-setup/setup.sh repair-nginx` (disables default site, reapplies mastodon vhost) |
-| `mastodon-streaming` active but streaming health fails | Mastodon 4.3+ shim only — `/root/mastodon-setup/setup.sh repair-streaming` (starts `mastodon-streaming@4000`) |
 | Federation not working | Bot Fight Mode disabled? `journalctl -u mastodon-sidekiq`; confirm nginx sends `X-Forwarded-Proto https`. |
 | Media not loading | `garage status`; `<media-domain>` DNS/tunnel route; `garage bucket info mastodon` (website + alias); tunnel routes media → `:3902`. |
-| WebSocket disconnects | Cloudflare WebSockets ON; streaming service active; nginx `/api/v1/streaming` upgrade headers present. |
+| WebSocket disconnects | Cloudflare WebSockets ON; `systemctl is-active mastodon-streaming@4000`; nginx `/api/v1/streaming` upgrade headers present. |
+| nginx loopback `/health` not 200 | `nginx -T \| grep -E 'listen\|server_name'` — stock Debian `default` site may still be on port 80; re-run `/root/mastodon-setup/setup.sh` (Phase 10 reapplies the mastodon vhost). |
+| Streaming health fails | `systemctl status mastodon-streaming@4000`; `journalctl -u mastodon-streaming@4000 -n 50`. |
 | Tunnel unhealthy | `journalctl -u cloudflared`; Super Bot Fight Mode; confirm `/etc/cloudflared/<tunnel-id>.json` exists and `config.yml` references it. |
 | Tunnel/DNS not created | Re-run `setup.sh` (re-prompts for the API token); confirm token scopes (Tunnel:Edit, DNS:Edit, Zone:Zone:Read) and that both hostnames' zones are Active. Conflicting A/AAAA records are removed automatically when the tunnel CNAME is created. |
 | After a node move | `mountpoint /mnt/garage-data`? `garage status` healthy? |

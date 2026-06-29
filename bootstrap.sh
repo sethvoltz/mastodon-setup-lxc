@@ -16,7 +16,7 @@
 set -euo pipefail
 
 # Bump when bootstrap behavior changes (printed at startup so you can verify what ran).
-BOOTSTRAP_VERSION="6"
+BOOTSTRAP_VERSION="7"
 MASTODON_SETUP_REPO="${MASTODON_SETUP_REPO:-sethvoltz/mastodon-setup-lxc}"
 MASTODON_SETUP_REF="${MASTODON_SETUP_REF:-main}"
 
@@ -199,8 +199,7 @@ cat <<EOF
 Container $CTID ($CT_HOSTNAME) is up. Run the installer inside the container:
 
     pct enter $CTID
-    bash -c "\$(curl -fsSL -H 'Cache-Control: no-cache' \\
-      \"https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${MASTODON_SETUP_REF}/setup.sh?\$(date +%s)\")"
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${MASTODON_SETUP_REF}/setup.sh)"
 
 setup.sh fetches its own templates from GitHub, then runs 15 resumable phases
 (incl. Cloudflare Tunnel + DNS via API). Pin a ref with: export MASTODON_SETUP_REF=<tag-or-sha>
