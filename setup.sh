@@ -27,6 +27,7 @@ PACKAGE_FILES=(
   "systemd/garage.service"
   "systemd/cloudflared.service"
   "nginx/mastodon"
+  "nginx/streaming-map.conf"
   "cloudflared/config.yml"
   "env.production.template"
 )
@@ -53,7 +54,7 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="4"
+SETUP_VERSION="5"
 
 # ===========================================================================
 # Helpers
@@ -266,6 +267,32 @@ need_secret() {
 # Run a command as the mastodon user, in the live dir, with rbenv shims on PATH.
 m_run() {
   runuser -l mastodon -c "export PATH=\$HOME/.rbenv/bin:\$HOME/.rbenv/shims:\$PATH; export COREPACK_ENABLE_DOWNLOAD_PROMPT=0; cd $LIVE && $*"
+}
+
+# Mastodon 4.3+ ships mastodon-streaming.service as a oneshot shim; the real Node
+# process is mastodon-streaming@4000. Install both and start the template instance.
+install_mastodon_streaming_units() {
+  local unit="mastodon-streaming@4000"
+  [[ -f "${LIVE}/dist/mastodon-streaming@.service" ]] \
+    || die "No mastodon-streaming@.service in ${LIVE}/dist/."
+  install -m 0644 "${LIVE}/dist/mastodon-streaming@.service" /etc/systemd/system/mastodon-streaming@.service
+  if [[ -f "${LIVE}/dist/mastodon-streaming.service" ]]; then
+    install -m 0644 "${LIVE}/dist/mastodon-streaming.service" /etc/systemd/system/mastodon-streaming.service
+  fi
+  systemctl daemon-reload
+  systemctl enable --now "$unit"
+  state_put STREAMING_UNIT "$unit"
+  printf '%s' "$unit"
+}
+
+configure_nginx_mastodon() {
+  TOKENS=( [WEB_DOMAIN]="$WEB_DOMAIN" )
+  render_template "${SETUP_DIR}/nginx/mastodon" /etc/nginx/sites-available/mastodon
+  install -m 0644 "${SETUP_DIR}/nginx/streaming-map.conf" /etc/nginx/conf.d/mastodon-streaming-map.conf
+  ln -sf /etc/nginx/sites-available/mastodon /etc/nginx/sites-enabled/mastodon
+  rm -f /etc/nginx/sites-enabled/default
+  nginx -t
+  systemctl reload nginx
 }
 
 # Install Node.js major version from .nvmrc (must run after Mastodon checkout).
@@ -690,18 +717,18 @@ if is_done 9; then c_warn "Phase 9 done — skipping."; else
   for u in mastodon-web mastodon-sidekiq; do
     install -m 0644 "${LIVE}/dist/${u}.service" "/etc/systemd/system/${u}.service"
   done
-  STREAMING_UNIT="mastodon-streaming"
-  if [[ -f "${LIVE}/dist/mastodon-streaming.service" ]]; then
+  if [[ -f "${LIVE}/dist/mastodon-streaming@.service" ]]; then
+    STREAMING_UNIT="$(install_mastodon_streaming_units)"
+  elif [[ -f "${LIVE}/dist/mastodon-streaming.service" ]]; then
     install -m 0644 "${LIVE}/dist/mastodon-streaming.service" /etc/systemd/system/mastodon-streaming.service
-  elif [[ -f "${LIVE}/dist/mastodon-streaming@.service" ]]; then
-    install -m 0644 "${LIVE}/dist/mastodon-streaming@.service" /etc/systemd/system/mastodon-streaming@.service
-    STREAMING_UNIT="mastodon-streaming@4000"
+    STREAMING_UNIT="mastodon-streaming"
+    state_put STREAMING_UNIT "$STREAMING_UNIT"
+    systemctl daemon-reload
+    systemctl enable --now "$STREAMING_UNIT"
   else
     die "No streaming unit found in ${LIVE}/dist/."
   fi
-  state_put STREAMING_UNIT "$STREAMING_UNIT"
-  systemctl daemon-reload
-  systemctl enable --now mastodon-web mastodon-sidekiq "$STREAMING_UNIT"
+  systemctl enable --now mastodon-web mastodon-sidekiq
   c_ok "Started mastodon-web, mastodon-sidekiq, ${STREAMING_UNIT}."
   mark_done 9
 fi
@@ -711,12 +738,7 @@ fi
 # ===========================================================================
 if is_done 10; then c_warn "Phase 10 done — skipping."; else
   c_hdr "Phase 10: nginx"
-  TOKENS=( [WEB_DOMAIN]="$WEB_DOMAIN" )
-  render_template "${SETUP_DIR}/nginx/mastodon" /etc/nginx/sites-available/mastodon
-  ln -sf /etc/nginx/sites-available/mastodon /etc/nginx/sites-enabled/mastodon
-  rm -f /etc/nginx/sites-enabled/default
-  nginx -t
-  systemctl reload nginx
+  configure_nginx_mastodon
   c_ok "nginx configured and reloaded."
   mark_done 10
 fi
@@ -732,7 +754,7 @@ if is_done 11; then c_warn "Phase 11 done — skipping."; else
   c_hdr "Phase 11: Cloudflare Tunnel"
   # API token is requested here (only when this phase runs) and never persisted.
   [[ -n "${CF_API_TOKEN:-}" ]] || prompt_secret CF_API_TOKEN \
-    "Cloudflare API token (Account:Cloudflare Tunnel:Edit + Zone:DNS:Edit + Zone:Read)"
+    "Cloudflare API token (Account:Cloudflare Tunnel:Edit + Zone:DNS:Edit + Zone:Zone:Read)"
 
   if ! command -v cloudflared >/dev/null 2>&1; then
     curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
@@ -824,7 +846,19 @@ fi
 # Phase 14: Final health check
 # ===========================================================================
 c_hdr "Phase 14: Final health check"
-STREAMING_UNIT="${STREAMING_UNIT:-mastodon-streaming}"
+# Repair common post-upgrade gaps when phases 9/10 were marked done earlier.
+if [[ -f "${LIVE}/dist/mastodon-streaming@.service" ]]; then
+  if ! systemctl is-active --quiet mastodon-streaming@4000 2>/dev/null; then
+    c_warn "mastodon-streaming@4000 not active — installing template unit and starting."
+    STREAMING_UNIT="$(install_mastodon_streaming_units)"
+  fi
+fi
+if [[ -f /etc/nginx/sites-enabled/default ]] \
+  || ! nginx -T 2>/dev/null | grep -qF "server_name ${WEB_DOMAIN};"; then
+  c_warn "nginx default site still enabled or mastodon vhost missing — reapplying."
+  configure_nginx_mastodon
+fi
+STREAMING_UNIT="${STREAMING_UNIT:-mastodon-streaming@4000}"
 declare -a RESULTS=()
 check_unit() { systemctl is-active --quiet "$1" && RESULTS+=("$1|PASS") || RESULTS+=("$1|FAIL"); }
 check_http() {  # name url
