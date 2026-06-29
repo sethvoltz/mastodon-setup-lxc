@@ -54,7 +54,7 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="5"
+SETUP_VERSION="6"
 
 # ===========================================================================
 # Helpers
@@ -286,11 +286,17 @@ install_mastodon_streaming_units() {
 }
 
 configure_nginx_mastodon() {
+  [[ -n "${WEB_DOMAIN:-}" ]] || die "WEB_DOMAIN unset — complete Phase 0 first."
   TOKENS=( [WEB_DOMAIN]="$WEB_DOMAIN" )
   render_template "${SETUP_DIR}/nginx/mastodon" /etc/nginx/sites-available/mastodon
-  install -m 0644 "${SETUP_DIR}/nginx/streaming-map.conf" /etc/nginx/conf.d/mastodon-streaming-map.conf
+  if [[ -f "${SETUP_DIR}/nginx/streaming-map.conf" ]]; then
+    install -m 0644 "${SETUP_DIR}/nginx/streaming-map.conf" /etc/nginx/conf.d/mastodon-streaming-map.conf
+  fi
   ln -sf /etc/nginx/sites-available/mastodon /etc/nginx/sites-enabled/mastodon
-  rm -f /etc/nginx/sites-enabled/default
+  rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
+  if [[ -f /etc/nginx/sites-available/default ]]; then
+    mv -f /etc/nginx/sites-available/default /etc/nginx/sites-available/default.disabled-by-mastodon-setup 2>/dev/null || true
+  fi
   nginx -t
   systemctl reload nginx
 }
@@ -853,11 +859,8 @@ if [[ -f "${LIVE}/dist/mastodon-streaming@.service" ]]; then
     STREAMING_UNIT="$(install_mastodon_streaming_units)"
   fi
 fi
-if [[ -f /etc/nginx/sites-enabled/default ]] \
-  || ! nginx -T 2>/dev/null | grep -qF "server_name ${WEB_DOMAIN};"; then
-  c_warn "nginx default site still enabled or mastodon vhost missing — reapplying."
-  configure_nginx_mastodon
-fi
+c_ok "Reapplying nginx mastodon vhost (WEB_DOMAIN=${WEB_DOMAIN})."
+configure_nginx_mastodon
 STREAMING_UNIT="${STREAMING_UNIT:-mastodon-streaming@4000}"
 declare -a RESULTS=()
 check_unit() { systemctl is-active --quiet "$1" && RESULTS+=("$1|PASS") || RESULTS+=("$1|FAIL"); }
@@ -865,13 +868,25 @@ check_http() {  # name url
   local code; code="$(curl -s -o /dev/null -w '%{http_code}' "$2" 2>/dev/null || echo 000)"
   [[ "$code" == "200" ]] && RESULTS+=("$1|PASS ($code)") || RESULTS+=("$1|FAIL ($code)")
 }
+check_nginx_loopback() {
+  local code app_code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${WEB_DOMAIN}" "http://127.0.0.1:80/health" 2>/dev/null || echo 000)"
+  app_code="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${WEB_DOMAIN}" "http://127.0.0.1:3000/health" 2>/dev/null || echo 000)"
+  if [[ "$code" == "200" ]]; then
+    RESULTS+=("nginx loopback|PASS ($code)")
+  elif [[ "$app_code" != "200" ]]; then
+    RESULTS+=("nginx loopback|FAIL ($code; app+Host=${app_code} — check LOCAL_DOMAIN/WEB_DOMAIN in .env.production)")
+  else
+    RESULTS+=("nginx loopback|FAIL ($code; default nginx site may still be serving :80)")
+  fi
+}
 
 for u in postgresql redis-server nginx mastodon-web mastodon-sidekiq "$STREAMING_UNIT" garage cloudflared; do
   check_unit "$u"
 done
 check_http "web /health"        "http://127.0.0.1:3000/health"
 check_http "streaming /health"  "http://127.0.0.1:4000/api/v1/streaming/health"
-RESULTS+=("nginx loopback|$(curl -s -o /dev/null -w '%{http_code}' -H "Host: ${WEB_DOMAIN}" http://127.0.0.1:80/health 2>/dev/null || echo 000)")
+check_nginx_loopback
 garage bucket info "$GARAGE_BUCKET" >/dev/null 2>&1 && RESULTS+=("garage bucket|PASS") || RESULTS+=("garage bucket|FAIL")
 ( mountpoint -q "$GARAGE_DATA" && [[ -w "$GARAGE_DATA" ]] ) && RESULTS+=("garage-data mount|PASS") || RESULTS+=("garage-data mount|FAIL")
 

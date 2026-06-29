@@ -49,5 +49,10 @@ server {
     tcp_nodelay on;
   }
 
-  location = /health { proxy_pass http://127.0.0.1:3000/health; }
+  location = /health {
+    proxy_pass http://127.0.0.1:3000/health;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+  }
 }
