@@ -53,7 +53,7 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="2"
+SETUP_VERSION="3"
 
 # ===========================================================================
 # Helpers
@@ -310,6 +310,28 @@ if is_done 2; then c_warn "Phase 2 done — skipping."; else
   fi
   apt install -y postgresql-16
   systemctl enable --now postgresql
+  # Minimal LXCs often init Postgres with SQL_ASCII (C locale); Mastodon needs UTF8.
+  PG_ENC="$(runuser -u postgres -- psql -tAc "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname='template1'" | tr -d '[:space:]')"
+  if [[ "$PG_ENC" != "UTF8" ]]; then
+    c_warn "PostgreSQL template1 encoding is '${PG_ENC}' — recreating cluster as UTF8."
+    apt install -y locales
+    if [[ -f /etc/locale.gen ]] && ! locale -a 2>/dev/null | grep -qi 'en_us.utf-8'; then
+      sed -i 's/# \(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen
+      grep -q 'en_US.UTF-8 UTF-8' /etc/locale.gen || echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
+      locale-gen en_US.UTF-8
+    fi
+    systemctl stop postgresql
+    pg_dropcluster --stop 16 main
+    if locale -a 2>/dev/null | grep -qi 'en_us.utf-8'; then
+      pg_createcluster 16 main --encoding=UTF8 --locale=en_US.UTF-8
+    else
+      pg_createcluster 16 main --encoding=UTF8 --locale=C.UTF-8
+    fi
+    systemctl start postgresql
+    c_ok "PostgreSQL cluster recreated with UTF8."
+  else
+    c_ok "PostgreSQL cluster encoding is UTF8."
+  fi
   # Role with CREATEDB + peer auth (no password); db:setup (Phase 7) creates the DB.
   if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='mastodon'" | grep -q 1; then
     runuser -u postgres -- psql -c "CREATE USER mastodon CREATEDB;"
@@ -565,6 +587,12 @@ fi
 # ===========================================================================
 if is_done 7; then c_warn "Phase 7 done — skipping."; else
   c_hdr "Phase 7: Database setup"
+  # template1 may be SQL_ASCII on minimal images — create UTF8 DB from template0.
+  if ! runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_database WHERE datname='mastodon_production'" | grep -q 1; then
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c \
+      "CREATE DATABASE mastodon_production OWNER mastodon ENCODING 'UTF8' TEMPLATE template0;"
+    c_ok "Created mastodon_production (UTF8, template0)."
+  fi
   m_run "RAILS_ENV=production bundle exec rails db:setup"
   c_ok "Database created, schema loaded, seeded."
   mark_done 7
