@@ -16,7 +16,7 @@
 set -euo pipefail
 
 # Bump when bootstrap behavior changes (printed at startup so you can verify what ran).
-BOOTSTRAP_VERSION="5"
+BOOTSTRAP_VERSION="6"
 MASTODON_SETUP_REPO="${MASTODON_SETUP_REPO:-sethvoltz/mastodon-setup-lxc}"
 MASTODON_SETUP_REF="${MASTODON_SETUP_REF:-main}"
 
@@ -178,6 +178,18 @@ done
 pct exec "$CTID" -- test -w /mnt/garage-data \
   || die "/mnt/garage-data is not writable inside the container — check the bind mount."
 c_ok "Container running; /mnt/garage-data is writable."
+
+# ---------------------------------------------------------------------------
+# Phase 7: curl in the container (debian-12-standard has neither curl nor wget)
+# ---------------------------------------------------------------------------
+# setup.sh is meant to be fetched via curl from inside the CT; install curl here
+# from the host so the operator never hits a chicken-and-egg on a bare template.
+c_hdr "Installing curl in container"
+pct exec "$CTID" -- bash -c \
+  'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y curl ca-certificates'
+pct exec "$CTID" -- curl --version >/dev/null \
+  || die "curl is not working inside container $CTID — check network/DNS."
+c_ok "curl ready inside container $CTID."
 
 # ---------------------------------------------------------------------------
 # Next steps

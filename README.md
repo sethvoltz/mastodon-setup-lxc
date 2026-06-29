@@ -83,7 +83,7 @@ bash -c "$(curl -fsSL -H 'Cache-Control: no-cache' \
   "https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/bootstrap.sh?$(date +%s)")"
 ```
 
-You should see `bootstrap.sh v5` near the top of the run. If the IP prompt says **blank for DHCP** or lacks a **`[dhcp]`** default, you have an old copy — re-run with the command above, pin a commit SHA in the URL, or use a git checkout.
+You should see `bootstrap.sh v6` near the top of the run. If the IP prompt says **blank for DHCP** or lacks a **`[dhcp]`** default, you have an old copy — re-run with the command above, pin a commit SHA in the URL, or use a git checkout.
 
 Or from a checkout on the PVE node:
 ```bash
@@ -93,13 +93,13 @@ chmod +x bootstrap.sh
 
 Pin a branch, tag, or commit by exporting `MASTODON_SETUP_REF` before either command (e.g. `export MASTODON_SETUP_REF=v1.0.0`). **Push your chosen ref to GitHub before using the curl one-liner** — it fetches from the remote, not your local tree.
 
-It prompts for the container ID, hostname, resources (default **40 GB** root disk), storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. Press **Enter** at the IP prompt to accept the default **`dhcp`**. It creates and starts the LXC only — **setup is run separately inside the container** (step 3).
+It prompts for the container ID, hostname, resources (default **40 GB** root disk), storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. Press **Enter** at the IP prompt to accept the default **`dhcp`**. It creates and starts the LXC, installs **curl** in the container (the Debian template has none), then exits — **setup is run separately** (step 3).
 
 ---
 
 ## 3. Run `setup.sh` inside the LXC
 
-From a **bare container** (recommended — same curl pattern as bootstrap):
+From a **bare container** (recommended — bootstrap installs `curl` first; same curl pattern as bootstrap):
 
 ```bash
 pct enter <CTID>
@@ -107,7 +107,15 @@ bash -c "$(curl -fsSL -H 'Cache-Control: no-cache' \
   "https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh?$(date +%s)")"
 ```
 
-`setup.sh` installs `curl` if the template lacks it, fetches templates into `/root/mastodon-setup/`, then runs all install phases. Re-runs use the on-disk copy:
+**Already have a container without curl?** From the PVE host (no console login needed):
+
+```bash
+pct exec <CTID> -- bash -c 'apt-get update && apt-get install -y curl ca-certificates'
+```
+
+Or from inside the CT after `pct enter <CTID>`: same `apt-get` line, then run the curl setup command above.
+
+`setup.sh` fetches templates into `/root/mastodon-setup/`, then runs all install phases. Re-runs use the on-disk copy:
 
 ```bash
 /root/mastodon-setup/setup.sh

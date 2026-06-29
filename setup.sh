@@ -38,6 +38,8 @@ MASTODON_HOME="/home/mastodon"
 LIVE="${MASTODON_HOME}/live"
 GARAGE_DATA="/mnt/garage-data"
 export GARAGE_CONFIG_FILE="/etc/garage/garage.toml"   # used by the garage CLI
+GARAGE="/usr/local/bin/garage"
+export PATH="/usr/local/bin:${PATH}"
 
 # Garage release to install. Bump GARAGE_VERSION as new stable releases land.
 # Leave GARAGE_SHA256 empty to verify against the upstream .sha256sum file, or
@@ -51,7 +53,7 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="1"
+SETUP_VERSION="2"
 
 # ===========================================================================
 # Helpers
@@ -61,6 +63,16 @@ c_ok()  { printf '\033[1;32m[ok]\033[0m %s\n' "$*">&2; }
 c_warn(){ printf '\033[1;33m[warn]\033[0m %s\n' "$*">&2; }
 c_err() { printf '\033[1;31m[err]\033[0m %s\n' "$*" >&2; }
 die()   { c_err "$*"; exit 1; }
+
+# Strip ANSI + CR so rake/colored output still parses.
+strip_ansi() { sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tr -d '\r'; }
+
+# Parse KEY=value from db:encryption:init (ACTIVE_RECORD_ENCRYPTION_*= lines).
+parse_env_key() {
+  local text="$1" key="$2" val
+  val="$(printf '%s' "$text" | strip_ansi | grep -E "(^|[[:space:]])${key}=" | tail -1 | sed "s/.*${key}=//")"
+  printf '%s' "$val"
+}
 
 package_complete() {
   local dir="$1" f
@@ -152,29 +164,30 @@ need_secret() {
 
 # Run a command as the mastodon user, in the live dir, with rbenv shims on PATH.
 m_run() {
-  runuser -l mastodon -c "export PATH=\$HOME/.rbenv/bin:\$HOME/.rbenv/shims:\$PATH; cd $LIVE && $*"
+  runuser -l mastodon -c "export PATH=\$HOME/.rbenv/bin:\$HOME/.rbenv/shims:\$PATH; export COREPACK_ENABLE_DOWNLOAD_PROMPT=0; cd $LIVE && $*"
 }
 
 # Install Node.js major version from .nvmrc (must run after Mastodon checkout).
 install_nodejs() {
   local NODE_MAJOR="$NODE_MAJOR_DEFAULT" cur_major=""
+  export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
   [[ -f "${LIVE}/.nvmrc" ]] && NODE_MAJOR="$(tr -dc '0-9.' < "${LIVE}/.nvmrc" | cut -d. -f1)"
   command -v node >/dev/null 2>&1 && cur_major="$(node -v 2>/dev/null | tr -dc '0-9.' | cut -d. -f1)"
   if [[ "$cur_major" == "$NODE_MAJOR" ]]; then
     corepack enable
-    corepack prepare yarn@stable --activate
-    c_ok "Node $(node -v), corepack/yarn enabled."
-    return 0
+  else
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list
+    apt update
+    apt install -y nodejs
+    corepack enable
   fi
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
-    > /etc/apt/sources.list.d/nodesource.list
-  apt update
-  apt install -y nodejs
-  corepack enable
-  corepack prepare yarn@stable --activate
-  c_ok "Node $(node -v), corepack/yarn enabled."
+  # Pin yarn to Mastodon's packageManager field (e.g. yarn@4.16.0), not @stable.
+  [[ -f "${LIVE}/package.json" ]] || die "Mastodon checkout missing ${LIVE}/package.json — complete Phase 3 first."
+  (cd "$LIVE" && corepack install)
+  c_ok "Node $(node -v), yarn $(cd "$LIVE" && corepack yarn --version) (corepack, non-interactive)."
 }
 
 # Template rendering — replaces every %%TOKEN%% from the TOKENS map (literal, regex-safe).
@@ -319,7 +332,7 @@ if is_done 3; then
 fi
 if [[ "$PHASE3_SKIP" -eq 0 ]]; then
   c_hdr "Phase 3: Ruby via rbenv + Mastodon checkout"
-  id mastodon &>/dev/null || adduser --disabled-login --gecos "" mastodon
+  id mastodon &>/dev/null || adduser --disabled-password --gecos "" mastodon
   chmod o+x "${MASTODON_HOME}"   # nginx (www-data) must traverse to serve /public assets
 
   # shellcheck disable=SC2016  # literal $HOME / $(rbenv init) written verbatim into the rc files
@@ -399,7 +412,11 @@ if is_done 5; then c_warn "Phase 5 done — skipping."; else
     fi
     install -m 0755 "${tmp}/garage" /usr/local/bin/garage
     rm -rf "$tmp"
-    c_ok "Garage ${GARAGE_VERSION} installed (sha256 verified)."
+    if [[ -n "$expected" ]]; then
+      c_ok "Garage ${GARAGE_VERSION} installed (sha256 verified)."
+    else
+      c_ok "Garage ${GARAGE_VERSION} installed (checksum not verified)."
+    fi
   fi
 
   id garage &>/dev/null || adduser --system --group --no-create-home garage
@@ -424,9 +441,18 @@ if is_done 5; then c_warn "Phase 5 done — skipping."; else
   systemctl daemon-reload
   systemctl enable --now garage
 
-  # Wait until the daemon answers.
-  for _ in $(seq 1 30); do garage status >/dev/null 2>&1 && break; sleep 2; done
-  garage status >/dev/null 2>&1 || die "Garage did not become healthy — check 'journalctl -u garage'."
+  # Wait for the systemd unit, then for the RPC/admin CLI to answer.
+  # Fresh nodes report NO ROLE ASSIGNED until layout is applied — that still counts as up.
+  for _ in $(seq 1 30); do
+    systemctl is-active --quiet garage || { sleep 2; continue; }
+    garage node id -q >/dev/null 2>&1 && break
+    sleep 2
+  done
+  if ! garage node id -q >/dev/null 2>&1; then
+    c_err "Garage service journal (last 40 lines):"
+    journalctl -u garage -n 40 --no-pager >&2 || true
+    die "Garage did not start — see journal above."
+  fi
 
   # Single-node layout (idempotent).
   NODE_ID="$(garage node id -q 2>/dev/null | cut -d@ -f1)"
@@ -438,6 +464,11 @@ if is_done 5; then c_warn "Phase 5 done — skipping."; else
     garage layout apply --version "$((CUR_VER + 1))"
     c_ok "Garage single-node layout applied."
   fi
+  garage status >/dev/null 2>&1 || {
+    c_err "Garage layout applied but status check failed; journal (last 20 lines):"
+    journalctl -u garage -n 20 --no-pager >&2 || true
+    die "Garage status failed after layout — see journal above."
+  }
 
   # Bucket, key, public web read (idempotent).
   garage bucket info "$GARAGE_BUCKET" >/dev/null 2>&1 || garage bucket create "$GARAGE_BUCKET"
@@ -486,11 +517,19 @@ if is_done 6; then c_warn "Phase 6 done — skipping."; else
   AR_DETERMINISTIC="$(secret_get AR_ENCRYPTION_DETERMINISTIC_KEY)"
   AR_SALT="$(secret_get AR_ENCRYPTION_KEY_DERIVATION_SALT)"
   if [[ -z "$AR_PRIMARY" || -z "$AR_DETERMINISTIC" || -z "$AR_SALT" ]]; then
-    ENC_OUT="$(m_run "SECRET_KEY_BASE=${SECRET_KEY_BASE} RAILS_ENV=production bundle exec rails db:encryption:init")"
-    AR_PRIMARY="$(printf '%s' "$ENC_OUT" | awk -F': ' '/primary_key:/{gsub(/ /,"",$2); print $2}')"
-    AR_DETERMINISTIC="$(printf '%s' "$ENC_OUT" | awk -F': ' '/deterministic_key:/{gsub(/ /,"",$2); print $2}')"
-    AR_SALT="$(printf '%s' "$ENC_OUT" | awk -F': ' '/key_derivation_salt:/{gsub(/ /,"",$2); print $2}')"
-    [[ -n "$AR_PRIMARY" && -n "$AR_DETERMINISTIC" && -n "$AR_SALT" ]] || die "Could not parse db:encryption:init output."
+    ENC_OUT="$(m_run "env -u ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY -u ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY -u ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT RAILS_ENV=production bundle exec rails db:encryption:init")"
+    AR_PRIMARY="$(parse_env_key "$ENC_OUT" ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY)"
+    AR_DETERMINISTIC="$(parse_env_key "$ENC_OUT" ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY)"
+    AR_SALT="$(parse_env_key "$ENC_OUT" ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT)"
+    # Legacy rake output (primary_key: …) — kept for older Mastodon tags.
+    [[ -n "$AR_PRIMARY" ]]       || AR_PRIMARY="$(printf '%s' "$ENC_OUT" | strip_ansi | awk -F': ' '/primary_key:/{gsub(/ /,"",$2); print $2; exit}')"
+    [[ -n "$AR_DETERMINISTIC" ]] || AR_DETERMINISTIC="$(printf '%s' "$ENC_OUT" | strip_ansi | awk -F': ' '/deterministic_key:/{gsub(/ /,"",$2); print $2; exit}')"
+    [[ -n "$AR_SALT" ]]          || AR_SALT="$(printf '%s' "$ENC_OUT" | strip_ansi | awk -F': ' '/key_derivation_salt:/{gsub(/ /,"",$2); print $2; exit}')"
+    if [[ -z "$AR_PRIMARY" || -z "$AR_DETERMINISTIC" || -z "$AR_SALT" ]]; then
+      c_err "db:encryption:init output was:"
+      printf '%s\n' "$ENC_OUT" >&2
+      die "Could not parse db:encryption:init output."
+    fi
     secret_set AR_ENCRYPTION_PRIMARY_KEY "$AR_PRIMARY"
     secret_set AR_ENCRYPTION_DETERMINISTIC_KEY "$AR_DETERMINISTIC"
     secret_set AR_ENCRYPTION_KEY_DERIVATION_SALT "$AR_SALT"
