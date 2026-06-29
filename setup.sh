@@ -243,7 +243,11 @@ is_done()   { local v="PHASE_${1}_DONE"; [[ "${!v:-}" == "1" ]]; }
 
 # Secrets: KEY=value lines, chmod 600, reused across re-runs.
 [[ -f "$SECRETS_FILE" ]] && chmod 600 "$SECRETS_FILE"
-secret_get() { [[ -f "$SECRETS_FILE" ]] && grep -E "^$1=" "$SECRETS_FILE" | head -1 | cut -d= -f2- || true; }
+secret_get() {
+  if [[ -f "$SECRETS_FILE" ]]; then
+    grep -E "^$1=" "$SECRETS_FILE" | head -1 | cut -d= -f2- || true
+  fi
+}
 secret_set() {
   local k="$1" v="$2"
   touch "$SECRETS_FILE"; chmod 600 "$SECRETS_FILE"
@@ -472,8 +476,9 @@ if is_done 0; then c_warn "Phase 0 done — skipping input collection."; else
   need CF_TUNNEL_NAME      "Cloudflare tunnel name"           "mastodon"
   need GARAGE_BUCKET       "Garage S3 bucket name"            "mastodon"
 
-  mountpoint -q "$GARAGE_DATA" && [[ -w "$GARAGE_DATA" ]] \
-    || die "$GARAGE_DATA is not a writable mountpoint. Re-check the bootstrap bind-mount step."
+  if ! mountpoint -q "$GARAGE_DATA" || [[ ! -w "$GARAGE_DATA" ]]; then
+    die "$GARAGE_DATA is not a writable mountpoint. Re-check the bootstrap bind-mount step."
+  fi
   c_ok "$GARAGE_DATA is mounted and writable."
   c_warn "The Cloudflare API token is requested in Phase 11 and is NOT stored on disk."
   mark_done 0
@@ -936,10 +941,21 @@ c_ok "Reapplying nginx mastodon vhost (WEB_DOMAIN=${WEB_DOMAIN})."
 configure_nginx_mastodon
 STREAMING_UNIT="${STREAMING_UNIT:-mastodon-streaming@4000}"
 declare -a RESULTS=()
-check_unit() { systemctl is-active --quiet "$1" && RESULTS+=("$1|PASS") || RESULTS+=("$1|FAIL"); }
+check_unit() {
+  if systemctl is-active --quiet "$1"; then
+    RESULTS+=("$1|PASS")
+  else
+    RESULTS+=("$1|FAIL")
+  fi
+}
 check_http() {  # name url
-  local code; code="$(curl -s -o /dev/null -w '%{http_code}' "$2" 2>/dev/null || echo 000)"
-  [[ "$code" == "200" ]] && RESULTS+=("$1|PASS ($code)") || RESULTS+=("$1|FAIL ($code)")
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' "$2" 2>/dev/null || echo 000)"
+  if [[ "$code" == "200" ]]; then
+    RESULTS+=("$1|PASS ($code)")
+  else
+    RESULTS+=("$1|FAIL ($code)")
+  fi
 }
 check_nginx_loopback() {
   local code app_code
@@ -960,8 +976,16 @@ done
 check_http "web /health"        "http://127.0.0.1:3000/health"
 check_http "streaming /health"  "http://127.0.0.1:4000/api/v1/streaming/health"
 check_nginx_loopback
-garage bucket info "$GARAGE_BUCKET" >/dev/null 2>&1 && RESULTS+=("garage bucket|PASS") || RESULTS+=("garage bucket|FAIL")
-( mountpoint -q "$GARAGE_DATA" && [[ -w "$GARAGE_DATA" ]] ) && RESULTS+=("garage-data mount|PASS") || RESULTS+=("garage-data mount|FAIL")
+if garage bucket info "$GARAGE_BUCKET" >/dev/null 2>&1; then
+  RESULTS+=("garage bucket|PASS")
+else
+  RESULTS+=("garage bucket|FAIL")
+fi
+if mountpoint -q "$GARAGE_DATA" && [[ -w "$GARAGE_DATA" ]]; then
+  RESULTS+=("garage-data mount|PASS")
+else
+  RESULTS+=("garage-data mount|FAIL")
+fi
 
 echo
 printf '%-26s %s\n' "CHECK" "RESULT"
@@ -969,13 +993,15 @@ printf '%-26s %s\n' "-----" "------"
 for r in "${RESULTS[@]}"; do printf '%-26s %s\n' "${r%%|*}" "${r##*|}"; done
 
 OWNER_PW="$(secret_get OWNER_PASSWORD)"
+OWNER_PW_MSG=""
+[[ -n "$OWNER_PW" ]] && OWNER_PW_MSG=" with password: ${OWNER_PW}"
 cat <<EOF
 
 ==========================================================================
  Mastodon deployment complete.
 
  1. Your instance:  https://${WEB_DOMAIN}
- 2. Log in as '${MASTODON_USERNAME}'$( [[ -n "$OWNER_PW" ]] && echo " with password: ${OWNER_PW}" || true )
+ 2. Log in as '${MASTODON_USERNAME}'${OWNER_PW_MSG}
  3. Admin -> Site Settings: fill in instance details
  4. Confirm the tunnel is healthy: Cloudflare Zero Trust -> Networks -> Tunnels
  5. Disable Bot Fight Mode (Security -> Bots); confirm WebSockets ON (Network -> WebSockets)

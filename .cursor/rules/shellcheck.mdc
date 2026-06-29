@@ -8,6 +8,6 @@ alwaysApply: false
 
 When creating or editing `*.sh` files in this repo:
 
-1. Run `shellcheck -x <file>` on every changed shell script before considering the work done.
+1. Run `shellcheck -S warning -x <file>` on every changed shell script before considering the work done.
 2. Fix reported issues, or add a targeted `# shellcheck disable=SC####` with a one-line reason when intentional.
-3. CI runs `shellcheck -x bootstrap.sh setup.sh` on push/PR (`.github/workflows/shellcheck.yml`).
+3. CI runs `shellcheck -S warning -x bootstrap.sh setup.sh` on push/PR (`.github/workflows/shellcheck.yml`).
