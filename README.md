@@ -87,9 +87,9 @@ chmod +x bootstrap.sh
 ./bootstrap.sh
 ```
 
-Pin a branch, tag, or commit by exporting `MASTODON_SETUP_REF` before either command (e.g. `export MASTODON_SETUP_REF=v1.0.0`).
+Pin a branch, tag, or commit by exporting `MASTODON_SETUP_REF` before either command (e.g. `export MASTODON_SETUP_REF=v1.0.0`). **Push your chosen ref to GitHub before using the curl one-liner** — it fetches from the remote, not your local tree.
 
-It prompts for the container ID, hostname, resources, storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. It then creates the LXC, attaches the CephFS bind mount, starts the container, and copies `setup.sh` + templates to `/root/mastodon-setup/` inside it.
+It prompts for the container ID, hostname, resources (default **40 GB** root disk), storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. Leave the IP blank to use **DHCP**. It then creates the LXC, attaches the CephFS bind mount, starts the container, and copies `setup.sh` + templates to `/root/mastodon-setup/` inside it.
 
 ---
 
@@ -105,10 +105,19 @@ If the package was not copied in (or you want to re-fetch templates), run withou
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh)"
 ```
 Templates land in `/root/mastodon-setup/` for re-runs. Use `MASTODON_SETUP_REF` to pin a release the same way as bootstrap.
-- **Phase 0** prompts for your web/media domains, owner account, SMTP, Cloudflare **Account ID**, and tunnel name (default `mastodon`).
-- **Phase 11** prompts for your Cloudflare **API token** (not stored), then creates the tunnel, writes its credentials, and provisions the proxied DNS records for both hostnames.
 
-Phases 1–14 run in order. If a phase fails, fix the cause and re-run the same command — completed phases are skipped via `/root/mastodon-setup/.install-state`.
+Optional environment variables before running setup:
+
+| Variable | Purpose |
+|----------|---------|
+| `MASTODON_TAG` | Pin Mastodon release (e.g. `v4.6.2`); default = latest stable non-rc tag |
+| `GARAGE_LAYOUT_CAPACITY` | Capacity passed to `garage layout assign` (default `100G`; independent of CephFS quota) |
+
+- **Phase 0** prompts for your web/media domains, owner account, SMTP, Cloudflare **Account ID**, and tunnel name (default `mastodon`).
+- **Phase 3** checks out Mastodon and compiles Ruby; **Phase 4** installs Node.js from the checked-out `.nvmrc`.
+- **Phase 11** prompts for your Cloudflare **API token** (not stored), then creates the tunnel, writes its credentials, and provisions proxied DNS records for both hostnames (replacing conflicting A/AAAA records if present).
+
+Phases 0–14 run in order. If a phase fails, fix the cause and re-run the same command — completed phases are skipped via `/root/mastodon-setup/.install-state`.
 
 At the end it prints a health-check table and the generated **owner password** — save it.
 
@@ -318,7 +327,7 @@ You can re-run the installer at any time to reprint the Phase 14 pass/fail table
 | Media not loading | `garage status`; `<media-domain>` DNS/tunnel route; `garage bucket info mastodon` (website + alias); tunnel routes media → `:3902`. |
 | WebSocket disconnects | Cloudflare WebSockets ON; streaming service active; nginx `/api/v1/streaming` upgrade headers present. |
 | Tunnel unhealthy | `journalctl -u cloudflared`; Super Bot Fight Mode; confirm `/etc/cloudflared/<tunnel-id>.json` exists and `config.yml` references it. |
-| Tunnel/DNS not created | Re-run `setup.sh` (re-prompts for the API token); confirm token scopes (Tunnel:Edit, DNS:Edit, Zone:Read) and that both hostnames' zones are Active. |
+| Tunnel/DNS not created | Re-run `setup.sh` (re-prompts for the API token); confirm token scopes (Tunnel:Edit, DNS:Edit, Zone:Read) and that both hostnames' zones are Active. Conflicting A/AAAA records are removed automatically when the tunnel CNAME is created. |
 | After a node move | `mountpoint /mnt/garage-data`? `garage status` healthy? |
 
 ---

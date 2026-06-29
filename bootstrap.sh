@@ -99,15 +99,15 @@ c_hdr "Inputs"
 DEFAULT_CTID="$(pvesh get /cluster/nextid 2>/dev/null || echo 200)"
 prompt CTID            "LXC container ID"                 "$DEFAULT_CTID"
 prompt CT_HOSTNAME     "Container hostname"               "mastodon"
-prompt ROOT_DISK       "Root disk size"                   "20G"
-prompt RAM_MB          "RAM (MB)"                          "4096"
-prompt CORES           "CPU cores"                         "2"
+prompt ROOT_DISK       "Root disk size"                   "40G"
+prompt RAM_MB          "RAM (MB)"                         "4096"
+prompt CORES           "CPU cores"                        "2"
 prompt ROOTFS_STORAGE  "Rootfs storage pool (RBD)"        "ceph"
 prompt CEPHFS_STORAGE  "CephFS storage name"              "cephfs"
 prompt GARAGE_SIZE     "Garage data size / CephFS quota"  "100G"
 prompt BRIDGE          "Network bridge"                   "vmbr0"
-prompt IP_CIDR         "Container IP (CIDR, e.g. 192.168.1.50/24)" ""
-prompt GATEWAY         "Gateway IP"                        ""
+prompt IP_CIDR         "Container IP (CIDR, blank for DHCP)" ""
+prompt GATEWAY         "Gateway IP (static IP only)"       ""
 
 ROOT_DISK_GB="${ROOT_DISK%[Gg]*}"   # 20G -> 20 (pct --rootfs wants GiB integer)
 [[ "$ROOT_DISK_GB" =~ ^[0-9]+$ ]] || die "Root disk size must look like '20G'."
@@ -153,6 +153,11 @@ c_hdr "Creating LXC $CTID"
 if pct status "$CTID" >/dev/null 2>&1; then
   c_warn "Container $CTID already exists — skipping create."
 else
+  if [[ -n "$IP_CIDR" ]]; then
+    NET0="name=eth0,bridge=${BRIDGE},ip=${IP_CIDR},gw=${GATEWAY}"
+  else
+    NET0="name=eth0,bridge=${BRIDGE},ip=dhcp"
+  fi
   pct create "$CTID" "local:vztmpl/${TEMPLATE}" \
     --hostname "$CT_HOSTNAME" \
     --cores "$CORES" \
@@ -161,7 +166,7 @@ else
     --rootfs "${ROOTFS_STORAGE}:${ROOT_DISK_GB}" \
     --unprivileged 0 \
     --features nesting=1 \
-    --net0 "name=eth0,bridge=${BRIDGE},ip=${IP_CIDR},gw=${GATEWAY}" \
+    --net0 "$NET0" \
     --nameserver "1.1.1.1 8.8.8.8" \
     --onboot 1 \
     --ostype debian

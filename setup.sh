@@ -46,7 +46,11 @@ GARAGE_VERSION="v1.0.1"
 GARAGE_SHA256=""
 GARAGE_BASE="https://garagehq.deuxfleurs.fr/_releases/${GARAGE_VERSION}/x86_64-unknown-linux-musl"
 
-NODE_MAJOR_DEFAULT="20"   # Mastodon 4.3+ needs Node 20+; overridden by repo .nvmrc if present
+NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc after Mastodon checkout
+# Pin a release tag (e.g. v4.6.2); empty = latest stable non-rc tag at install time.
+MASTODON_TAG="${MASTODON_TAG:-}"
+# Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
+GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
 
 # ===========================================================================
 # Helpers
@@ -139,6 +143,28 @@ m_run() {
   runuser -l mastodon -c "export PATH=\$HOME/.rbenv/bin:\$HOME/.rbenv/shims:\$PATH; cd $LIVE && $*"
 }
 
+# Install Node.js major version from .nvmrc (must run after Mastodon checkout).
+install_nodejs() {
+  local NODE_MAJOR="$NODE_MAJOR_DEFAULT" cur_major=""
+  [[ -f "${LIVE}/.nvmrc" ]] && NODE_MAJOR="$(tr -dc '0-9.' < "${LIVE}/.nvmrc" | cut -d. -f1)"
+  command -v node >/dev/null 2>&1 && cur_major="$(node -v 2>/dev/null | tr -dc '0-9.' | cut -d. -f1)"
+  if [[ "$cur_major" == "$NODE_MAJOR" ]]; then
+    corepack enable
+    corepack prepare yarn@stable --activate
+    c_ok "Node $(node -v), corepack/yarn enabled."
+    return 0
+  fi
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
+    > /etc/apt/sources.list.d/nodesource.list
+  apt update
+  apt install -y nodejs
+  corepack enable
+  corepack prepare yarn@stable --activate
+  c_ok "Node $(node -v), corepack/yarn enabled."
+}
+
 # Template rendering — replaces every %%TOKEN%% from the TOKENS map (literal, regex-safe).
 declare -A TOKENS=()
 render_template() {     # render_template SRC DST
@@ -178,9 +204,16 @@ cf_zone_id() {          # cf_zone_id HOST -> id of the longest-matching active z
   return 1
 }
 cf_dns_upsert() {       # cf_dns_upsert ZONE_ID FQDN TARGET  (proxied CNAME, upsert)
-  local zone="$1" fqdn="$2" target="$3" resp rec_id data
-  resp="$(cf_api GET "/zones/${zone}/dns_records?type=CNAME&name=${fqdn}")" || return 1
-  rec_id="$(jq -r '.result[0].id // empty' <<<"$resp")"
+  local zone="$1" fqdn="$2" target="$3" resp rec_id data rid rtype
+  resp="$(cf_api GET "/zones/${zone}/dns_records?name=${fqdn}")" || return 1
+  rec_id="$(jq -r '.result[] | select(.type == "CNAME") | .id' <<<"$resp" | head -1)"
+  if [[ -z "$rec_id" ]]; then
+    while read -r rid rtype; do
+      [[ -n "$rid" ]] || continue
+      cf_api DELETE "/zones/${zone}/dns_records/${rid}" >/dev/null || return 1
+      c_warn "Removed existing ${rtype} record for ${fqdn} (replaced with tunnel CNAME)."
+    done < <(jq -r '.result[] | select(.type == "A" or .type == "AAAA") | "\(.id) \(.type)"' <<<"$resp")
+  fi
   data="$(jq -nc --arg n "$fqdn" --arg c "$target" '{type:"CNAME",name:$n,content:$c,proxied:true,ttl:1}')"
   if [[ -n "$rec_id" ]]; then
     cf_api PUT "/zones/${zone}/dns_records/${rec_id}" "$data" >/dev/null
@@ -223,8 +256,8 @@ if is_done 1; then c_warn "Phase 1 done — skipping."; else
   apt update && apt upgrade -y
   # Debian 12 (bookworm) package names: libidn-dev and libncurses-dev.
   apt install -y curl wget gnupg lsb-release ca-certificates git sudo \
-    build-essential libssl-dev libreadline-dev zlib1g-dev \
-    libpq-dev libxml2-dev libxslt1-dev file imagemagick ffmpeg \
+    build-essential libssl-dev libreadline-dev zlib1g-dev libyaml-dev \
+    libpq-dev libxml2-dev libxslt1-dev file imagemagick ffmpeg libvips-tools \
     libidn-dev libicu-dev libjemalloc-dev \
     libprotobuf-dev protobuf-compiler pkg-config \
     autoconf bison libncurses-dev libffi-dev libgdbm-dev \
@@ -261,28 +294,21 @@ if is_done 2; then c_warn "Phase 2 done — skipping."; else
 fi
 
 # ===========================================================================
-# Phase 3: Node.js
+# Phase 3: Ruby via rbenv + Mastodon checkout
 # ===========================================================================
-if is_done 3; then c_warn "Phase 3 done — skipping."; else
-  c_hdr "Phase 3: Node.js"
-  NODE_MAJOR="$NODE_MAJOR_DEFAULT"
-  [[ -f "${LIVE}/.nvmrc" ]] && NODE_MAJOR="$(tr -dc '0-9.' < "${LIVE}/.nvmrc" | cut -d. -f1)"
-  if ! command -v node >/dev/null 2>&1 || [[ "$(node -v 2>/dev/null | tr -dc '0-9.' | cut -d. -f1)" != "$NODE_MAJOR" ]]; then
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
-    apt install -y nodejs
+PHASE3_SKIP=0
+if is_done 3; then
+  if [[ -f "${LIVE}/.ruby-version" ]]; then
+    c_warn "Phase 3 done — skipping."
+    PHASE3_SKIP=1
+  else
+    c_warn "Stale Phase 3 marker — re-running Mastodon checkout (Phase 3 now runs before Node.js)."
   fi
-  corepack enable
-  corepack prepare yarn@stable --activate
-  c_ok "Node $(node -v), corepack/yarn enabled."
-  mark_done 3
 fi
-
-# ===========================================================================
-# Phase 4: Ruby via rbenv + Mastodon checkout
-# ===========================================================================
-if is_done 4; then c_warn "Phase 4 done — skipping."; else
-  c_hdr "Phase 4: Ruby via rbenv + Mastodon checkout"
+if [[ "$PHASE3_SKIP" -eq 0 ]]; then
+  c_hdr "Phase 3: Ruby via rbenv + Mastodon checkout"
   id mastodon &>/dev/null || adduser --disabled-login --gecos "" mastodon
+  chmod o+x "${MASTODON_HOME}"   # nginx (www-data) must traverse to serve /public assets
 
   # shellcheck disable=SC2016  # literal $HOME / $(rbenv init) written verbatim into the rc files
   RBENV_INIT='export PATH="$HOME/.rbenv/bin:$PATH"
@@ -301,14 +327,40 @@ eval "$(rbenv init - bash)"'
 
   [[ -d "${LIVE}/.git" ]] || \
     runuser -l mastodon -c 'git clone https://github.com/mastodon/mastodon.git ~/live'
-  # shellcheck disable=SC2016  # $(...) intentionally evaluated in the mastodon login shell
-  runuser -l mastodon -c 'cd ~/live && git fetch --tags && git checkout "$(git tag -l | grep -v rc | sort -V | tail -1)"'
+  if [[ -n "$MASTODON_TAG" ]]; then
+    runuser -l mastodon -c "cd ~/live && git fetch --tags && git checkout '${MASTODON_TAG}'"
+  else
+    # shellcheck disable=SC2016  # $(...) intentionally evaluated in the mastodon login shell
+    runuser -l mastodon -c 'cd ~/live && git fetch --tags && git checkout "$(git tag -l | grep -E "^v[0-9.]+$" | grep -v rc | sort -V | tail -1)"'
+  fi
 
   RUBY_V="$(cat "${LIVE}/.ruby-version")"
   m_run "RUBY_CONFIGURE_OPTS=--with-jemalloc rbenv install -s ${RUBY_V}"
   m_run "rbenv global ${RUBY_V}"
   m_run "gem install bundler --no-document"
   c_ok "Ruby ${RUBY_V} installed; Mastodon checked out at $(runuser -l mastodon -c 'cd ~/live && git describe --tags')."
+  mark_done 3
+fi
+
+# ===========================================================================
+# Phase 4: Node.js (after checkout — reads .nvmrc from the Mastodon tree)
+# ===========================================================================
+PHASE4_SKIP=0
+if is_done 4; then
+  NODE_WANT="$(tr -dc '0-9.' < "${LIVE}/.nvmrc" 2>/dev/null | cut -d. -f1)"
+  NODE_WANT="${NODE_WANT:-$NODE_MAJOR_DEFAULT}"
+  NODE_HAVE="$(node -v 2>/dev/null | tr -dc '0-9.' | cut -d. -f1)"
+  if [[ -n "$NODE_HAVE" && "$NODE_HAVE" == "$NODE_WANT" ]]; then
+    c_warn "Phase 4 done — skipping."
+    PHASE4_SKIP=1
+  else
+    c_warn "Phase 4 marker set but Node ${NODE_HAVE:-none} != required ${NODE_WANT} — re-installing."
+  fi
+fi
+if [[ "$PHASE4_SKIP" -eq 0 ]]; then
+  c_hdr "Phase 4: Node.js"
+  [[ -f "${LIVE}/.nvmrc" ]] || die "Mastodon checkout missing ${LIVE}/.nvmrc — complete Phase 3 first."
+  install_nodejs
   mark_done 4
 fi
 
@@ -324,12 +376,15 @@ if is_done 5; then c_warn "Phase 5 done — skipping."; else
     actual="$(sha256sum "${tmp}/garage" | awk '{print $1}')"
     if [[ -n "$GARAGE_SHA256" ]]; then
       expected="$GARAGE_SHA256"
-    else
-      curl -fsSL "${GARAGE_BASE}/garage.sha256sum" -o "${tmp}/garage.sha256sum"
+    elif curl -fsSL "${GARAGE_BASE}/garage.sha256sum" -o "${tmp}/garage.sha256sum" 2>/dev/null; then
       expected="$(awk '{print $1}' "${tmp}/garage.sha256sum" | head -1)"
+    else
+      c_warn "Could not fetch upstream sha256sum — skipping Garage checksum verification."
+      expected=""
     fi
-    [[ -n "$expected" ]] || die "Could not determine expected Garage sha256."
-    [[ "$actual" == "$expected" ]] || die "Garage checksum mismatch (expected $expected, got $actual)."
+    if [[ -n "$expected" ]]; then
+      [[ "$actual" == "$expected" ]] || die "Garage checksum mismatch (expected $expected, got $actual)."
+    fi
     install -m 0755 "${tmp}/garage" /usr/local/bin/garage
     rm -rf "$tmp"
     c_ok "Garage ${GARAGE_VERSION} installed (sha256 verified)."
@@ -365,7 +420,7 @@ if is_done 5; then c_warn "Phase 5 done — skipping."; else
   NODE_ID="$(garage node id -q 2>/dev/null | cut -d@ -f1)"
   [[ -n "$NODE_ID" ]] || die "Could not read Garage node id."
   if ! garage layout show 2>/dev/null | grep -q "${NODE_ID:0:12}"; then
-    garage layout assign -z dc1 -c 100G "$NODE_ID"
+    garage layout assign -z dc1 -c "${GARAGE_LAYOUT_CAPACITY}" "$NODE_ID"
     CUR_VER="$(garage layout show 2>/dev/null | sed -n 's/.*layout version:[[:space:]]*\([0-9]\+\).*/\1/p' | head -1)"
     CUR_VER="${CUR_VER:-0}"
     garage layout apply --version "$((CUR_VER + 1))"
@@ -582,18 +637,16 @@ if is_done 12; then c_warn "Phase 12 done — skipping."; else
   c_hdr "Phase 12: Create initial owner account"
   OWNER_PW="$(secret_get OWNER_PASSWORD)"
   if [[ -z "$OWNER_PW" ]]; then
-    OUT="$(m_run "RAILS_ENV=production bin/tootctl accounts create ${MASTODON_USERNAME} --email ${MASTODON_USER_EMAIL} --confirmed --role Owner" 2>&1)" || true
-    OWNER_PW="$(printf '%s' "$OUT" | grep -iE 'password' | grep -oE '[A-Za-z0-9]{16,}' | head -1)"
-    if [[ -n "$OWNER_PW" ]]; then
-      secret_set OWNER_PASSWORD "$OWNER_PW"
-    else
-      c_warn "Could not parse a generated password. tootctl output was:"
-      printf '%s\n' "$OUT"
+    if ! OUT="$(m_run "RAILS_ENV=production bin/tootctl accounts create ${MASTODON_USERNAME} --email ${MASTODON_USER_EMAIL} --confirmed --role Owner" 2>&1)"; then
+      c_err "tootctl accounts create failed:"
+      printf '%s\n' "$OUT" >&2
+      die "Fix the error above and re-run setup.sh (Phase 12 will retry)."
     fi
+    OWNER_PW="$(printf '%s' "$OUT" | grep -iE 'password' | grep -oE '[A-Za-z0-9]{16,}' | head -1)"
+    [[ -n "$OWNER_PW" ]] || die "Could not parse a generated password from tootctl output."
+    secret_set OWNER_PASSWORD "$OWNER_PW"
   fi
-  if [[ -n "$OWNER_PW" ]]; then
-    printf '\n\033[1;33m*** SAVE THIS — owner password for %s: %s ***\033[0m\n\n' "$MASTODON_USERNAME" "$OWNER_PW"
-  fi
+  printf '\n\033[1;33m*** SAVE THIS — owner password for %s: %s ***\033[0m\n\n' "$MASTODON_USERNAME" "$OWNER_PW"
   mark_done 12
 fi
 
