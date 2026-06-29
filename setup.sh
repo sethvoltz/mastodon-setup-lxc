@@ -3,8 +3,8 @@
 # setup.sh — INSIDE-LXC installer for a self-hosted Mastodon instance.
 #
 # Runs as root inside the privileged Debian 12 LXC created by bootstrap.sh.
-# Structured in phases; each phase is gated by a marker in .install-state so the
-# script can be re-run after a failure without redoing completed work.
+# Self-contained: fetches templates from GitHub into /root/mastodon-setup/ when
+# needed, then runs resumable install phases (state in .install-state).
 #
 #   Storage: rootfs + Garage metadata on RBD rootfs; Garage data on the CephFS
 #   bind mount at /mnt/garage-data (provided by Proxmox before container init).
@@ -51,13 +51,14 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
+SETUP_VERSION="1"
 
 # ===========================================================================
 # Helpers
 # ===========================================================================
-c_hdr() { printf '\n\033[1;36m========== %s ==========\033[0m\n' "$*"; }
-c_ok()  { printf '\033[1;32m[ok]\033[0m %s\n' "$*"; }
-c_warn(){ printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
+c_hdr() { printf '\n\033[1;36m========== %s ==========\033[0m\n' "$*" >&2; }
+c_ok()  { printf '\033[1;32m[ok]\033[0m %s\n' "$*">&2; }
+c_warn(){ printf '\033[1;33m[warn]\033[0m %s\n' "$*">&2; }
 c_err() { printf '\033[1;31m[err]\033[0m %s\n' "$*" >&2; }
 die()   { c_err "$*"; exit 1; }
 
@@ -68,7 +69,7 @@ package_complete() {
   done
 }
 
-# Fetch missing templates when run via curl (no local checkout / bootstrap copy).
+# Fetch missing templates when run via curl (no local checkout on disk).
 ensure_package_at() {
   local dest="$1" f
   package_complete "$dest" && return 0
@@ -81,8 +82,19 @@ ensure_package_at() {
   done
 }
 
+# Bare Debian LXC may not have curl yet; install it before we fetch templates.
+ensure_curl() {
+  command -v curl >/dev/null && return 0
+  c_ok "Installing curl (needed to fetch setup templates)..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y curl ca-certificates
+}
+
 [[ $EUID -eq 0 ]] || die "Run as root inside the LXC."
+ensure_curl
 mkdir -p "$SETUP_DIR"
+c_ok "setup.sh v${SETUP_VERSION} (package ref ${MASTODON_SETUP_REF})"
 ensure_package_at "$SETUP_DIR"
 chmod +x "$SETUP_DIR/setup.sh"
 

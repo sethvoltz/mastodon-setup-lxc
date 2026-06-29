@@ -20,8 +20,8 @@ Internet → Cloudflare edge → cloudflared tunnel ─┬─ <web-domain>   →
 
 | File | Runs where | Purpose |
 |------|-----------|---------|
-| `bootstrap.sh` | PVE host | Creates the LXC (RBD rootfs, CephFS data bind mount) and copies the installer in. |
-| `setup.sh` | inside LXC | Installs and configures everything, in 14 resumable phases (incl. tunnel + DNS via API). |
+| `bootstrap.sh` | PVE host | Creates the LXC (RBD rootfs, CephFS data bind mount) and starts it. Does not install Mastodon. |
+| `setup.sh` | inside LXC | Self-contained installer: fetches templates from GitHub if needed, then runs 15 resumable phases (incl. tunnel + DNS via API). |
 | `garage/garage.toml` | inside LXC | Garage config template (S3 API + web endpoint). |
 | `nginx/mastodon` | inside LXC | nginx site (plain HTTP on loopback). |
 | `cloudflared/config.yml` | inside LXC | Tunnel ingress template. |
@@ -83,7 +83,7 @@ bash -c "$(curl -fsSL -H 'Cache-Control: no-cache' \
   "https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/bootstrap.sh?$(date +%s)")"
 ```
 
-You should see `bootstrap.sh v3` near the top of the run. If the IP prompt says **blank for DHCP** or lacks a **`[dhcp]`** default, you have an old copy — re-run with the command above, pin a commit SHA in the URL, or use a git checkout.
+You should see `bootstrap.sh v5` near the top of the run. If the IP prompt says **blank for DHCP** or lacks a **`[dhcp]`** default, you have an old copy — re-run with the command above, pin a commit SHA in the URL, or use a git checkout.
 
 Or from a checkout on the PVE node:
 ```bash
@@ -93,22 +93,27 @@ chmod +x bootstrap.sh
 
 Pin a branch, tag, or commit by exporting `MASTODON_SETUP_REF` before either command (e.g. `export MASTODON_SETUP_REF=v1.0.0`). **Push your chosen ref to GitHub before using the curl one-liner** — it fetches from the remote, not your local tree.
 
-It prompts for the container ID, hostname, resources (default **40 GB** root disk), storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. Press **Enter** at the IP prompt to accept the default **`dhcp`**. It then creates the LXC, attaches the CephFS bind mount, starts the container, and copies `setup.sh` + templates to `/root/mastodon-setup/` inside it.
+It prompts for the container ID, hostname, resources (default **40 GB** root disk), storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. Press **Enter** at the IP prompt to accept the default **`dhcp`**. It creates and starts the LXC only — **setup is run separately inside the container** (step 3).
 
 ---
 
 ## 3. Run `setup.sh` inside the LXC
 
+From a **bare container** (recommended — same curl pattern as bootstrap):
+
 ```bash
 pct enter <CTID>
+bash -c "$(curl -fsSL -H 'Cache-Control: no-cache' \
+  "https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh?$(date +%s)")"
+```
+
+`setup.sh` installs `curl` if the template lacks it, fetches templates into `/root/mastodon-setup/`, then runs all install phases. Re-runs use the on-disk copy:
+
+```bash
 /root/mastodon-setup/setup.sh
 ```
 
-If the package was not copied in (or you want to re-fetch templates), run without a checkout:
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/setup.sh)"
-```
-Templates land in `/root/mastodon-setup/` for re-runs. Use `MASTODON_SETUP_REF` to pin a release the same way as bootstrap.
+Use `MASTODON_SETUP_REF` to pin a branch, tag, or commit (export before the curl command). Optional: `MASTODON_TAG`, `GARAGE_LAYOUT_CAPACITY` — see table below.
 
 Optional environment variables before running setup:
 
