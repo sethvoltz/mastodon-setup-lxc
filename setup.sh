@@ -126,13 +126,21 @@ ensure_setup_script_current() {
   curl -fsSL "https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${sha}/setup.sh" -o "$tmp" \
     || { rm -f "$tmp"; return 0; }
   remote_ver="$(read_setup_version "$tmp")"
-  if [[ "$remote_ver" =~ ^[0-9]+$ && "$SETUP_VERSION" =~ ^[0-9]+$ && remote_ver -gt SETUP_VERSION ]]; then
-    chmod +x "$tmp"
-    mv "$tmp" "$dest"
-    c_ok "Updated setup.sh v${SETUP_VERSION} -> v${remote_ver} (${MASTODON_SETUP_REF}@${sha:0:7})"
-    exec "$dest" "$@"
+  if [[ "$remote_ver" =~ ^[0-9]+$ && "$SETUP_VERSION" =~ ^[0-9]+$ ]]; then
+    if (( remote_ver > SETUP_VERSION )); then
+      chmod +x "$tmp"
+      mv "$tmp" "$dest"
+      c_ok "Updated setup.sh v${SETUP_VERSION} -> v${remote_ver} (${MASTODON_SETUP_REF}@${sha:0:7})"
+      exec "$dest" "$@"
+    elif (( remote_ver == SETUP_VERSION )); then
+      chmod +x "$tmp"
+      mv "$tmp" "$dest"
+    else
+      rm -f "$tmp"
+    fi
+  else
+    rm -f "$tmp"
   fi
-  rm -f "$tmp"
 }
 
 [[ $EUID -eq 0 ]] || die "Run as root inside the LXC."
