@@ -230,6 +230,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Host: ${WEB_DOMAIN}" http://127.0.0
 source /root/mastodon-setup/.install-state
 /root/mastodon-setup/setup.sh repair-nginx       # default site still serving? loopback /health 404?
 /root/mastodon-setup/setup.sh repair-streaming   # mastodon-streaming active but :4000 down?
+/root/mastodon-setup/setup.sh repair-approve-owner  # owner stuck "under review"?
 ```
 
 ### PostgreSQL
@@ -349,6 +350,7 @@ You can re-run the installer at any time to reprint the Phase 14 pass/fail table
 
 | Symptom | Check |
 |---------|-------|
+| Owner account stuck "under review" | `/root/mastodon-setup/setup.sh repair-approve-owner` (Mastodon requires explicit approval even for Owner) |
 | nginx welcome page or loopback `/health` 404 | `/root/mastodon-setup/setup.sh repair-nginx` (disables default site, reapplies mastodon vhost) |
 | `mastodon-streaming` active but streaming health fails | Mastodon 4.3+ shim only — `/root/mastodon-setup/setup.sh repair-streaming` (starts `mastodon-streaming@4000`) |
 | Federation not working | Bot Fight Mode disabled? `journalctl -u mastodon-sidekiq`; confirm nginx sends `X-Forwarded-Proto https`. |

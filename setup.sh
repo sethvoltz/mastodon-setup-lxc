@@ -58,7 +58,7 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="11"
+SETUP_VERSION="12"
 
 # ===========================================================================
 # Helpers
@@ -455,6 +455,13 @@ if [[ "${1:-}" == "repair-streaming" ]]; then
     c_err "streaming /health -> ${code} (${STREAMING_UNIT}); journalctl -u ${STREAMING_UNIT} -n 30"
     exit 1
   fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "repair-approve-owner" ]]; then
+  [[ -n "${MASTODON_USERNAME:-}" ]] || die "MASTODON_USERNAME unset — complete Phase 0 first."
+  m_run "RAILS_ENV=production bin/tootctl accounts modify ${MASTODON_USERNAME} --approve"
+  c_ok "Approved owner account '${MASTODON_USERNAME}'."
   exit 0
 fi
 
@@ -905,6 +912,8 @@ if is_done 12; then c_warn "Phase 12 done — skipping."; else
     [[ -n "$OWNER_PW" ]] || die "Could not parse a generated password from tootctl output."
     secret_set OWNER_PASSWORD "$OWNER_PW"
   fi
+  m_run "RAILS_ENV=production bin/tootctl accounts modify ${MASTODON_USERNAME} --approve"
+  c_ok "Owner account '${MASTODON_USERNAME}' approved."
   printf '\n\033[1;33m*** SAVE THIS — owner password for %s: %s ***\033[0m\n\n' "$MASTODON_USERNAME" "$OWNER_PW"
   mark_done 12
 fi
