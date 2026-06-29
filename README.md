@@ -76,10 +76,14 @@ Complete all of these **before** running any script.
 
 ## 2. Run `bootstrap.sh` on the PVE host
 
-**Without cloning** (fetches the latest package from GitHub `main`):
+**Without cloning** (fetches from GitHub `main`; cache-bust query avoids stale CDN copies):
+
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/bootstrap.sh)"
+bash -c "$(curl -fsSL -H 'Cache-Control: no-cache' \
+  "https://raw.githubusercontent.com/sethvoltz/mastodon-setup-lxc/main/bootstrap.sh?$(date +%s)")"
 ```
+
+You should see `bootstrap.sh v3` near the top of the run. If the IP prompt says **blank for DHCP** or lacks a **`[dhcp]`** default, you have an old copy — re-run with the command above, pin a commit SHA in the URL, or use a git checkout.
 
 Or from a checkout on the PVE node:
 ```bash
@@ -89,7 +93,7 @@ chmod +x bootstrap.sh
 
 Pin a branch, tag, or commit by exporting `MASTODON_SETUP_REF` before either command (e.g. `export MASTODON_SETUP_REF=v1.0.0`). **Push your chosen ref to GitHub before using the curl one-liner** — it fetches from the remote, not your local tree.
 
-It prompts for the container ID, hostname, resources (default **40 GB** root disk), storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. Press **Enter** at the IP prompt to use **DHCP**. It then creates the LXC, attaches the CephFS bind mount, starts the container, and copies `setup.sh` + templates to `/root/mastodon-setup/` inside it.
+It prompts for the container ID, hostname, resources (default **40 GB** root disk), storage names (`ceph` / `cephfs`), the CephFS quota (default 100 GB), and network settings. Press **Enter** at the IP prompt to accept the default **`dhcp`**. It then creates the LXC, attaches the CephFS bind mount, starts the container, and copies `setup.sh` + templates to `/root/mastodon-setup/` inside it.
 
 ---
 

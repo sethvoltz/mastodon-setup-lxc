@@ -21,6 +21,8 @@ set -euo pipefail
 MASTODON_SETUP_REPO="${MASTODON_SETUP_REPO:-sethvoltz/mastodon-setup-lxc}"
 MASTODON_SETUP_REF="${MASTODON_SETUP_REF:-main}"
 RAW_BASE="https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${MASTODON_SETUP_REF}"
+# Bump when bootstrap behavior changes (printed at startup so you can verify what ran).
+BOOTSTRAP_VERSION="3"
 
 PACKAGE_FILES=(
   "setup.sh"
@@ -102,6 +104,7 @@ command -v pvesm >/dev/null   || die "pvesm not found — is this a Proxmox VE n
 # Phase 1: collect inputs
 # ---------------------------------------------------------------------------
 c_hdr "Inputs"
+c_ok "bootstrap.sh v${BOOTSTRAP_VERSION} (package ref ${MASTODON_SETUP_REF})"
 
 DEFAULT_CTID="$(pvesh get /cluster/nextid 2>/dev/null || echo 200)"
 prompt CTID            "LXC container ID"                 "$DEFAULT_CTID"
@@ -113,8 +116,8 @@ prompt ROOTFS_STORAGE  "Rootfs storage pool (RBD)"        "ceph"
 prompt CEPHFS_STORAGE  "CephFS storage name"              "cephfs"
 prompt GARAGE_SIZE     "Garage data size / CephFS quota"  "100G"
 prompt BRIDGE          "Network bridge"                   "vmbr0"
-prompt_optional IP_CIDR  "Container IP (CIDR, Enter for DHCP)"
-prompt_optional GATEWAY  "Gateway IP (static IP only, Enter to skip)"
+prompt IP_CIDR         "Container IP (CIDR, Enter for dhcp)" "dhcp"
+prompt_optional GATEWAY  "Gateway IP (required for static IP, Enter to skip)"
 
 ROOT_DISK_GB="${ROOT_DISK%[Gg]*}"   # 20G -> 20 (pct --rootfs wants GiB integer)
 [[ "$ROOT_DISK_GB" =~ ^[0-9]+$ ]] || die "Root disk size must look like '20G'."
@@ -160,7 +163,8 @@ c_hdr "Creating LXC $CTID"
 if pct status "$CTID" >/dev/null 2>&1; then
   c_warn "Container $CTID already exists — skipping create."
 else
-  if [[ -n "$IP_CIDR" ]]; then
+  if [[ -n "$IP_CIDR" && "${IP_CIDR,,}" != "dhcp" ]]; then
+    [[ -n "$GATEWAY" ]] || die "Gateway IP is required when using a static container IP."
     NET0="name=eth0,bridge=${BRIDGE},ip=${IP_CIDR},gw=${GATEWAY}"
   else
     NET0="name=eth0,bridge=${BRIDGE},ip=dhcp"
