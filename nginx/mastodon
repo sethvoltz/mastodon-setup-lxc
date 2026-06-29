@@ -4,10 +4,10 @@ server {
 
   root /home/mastodon/live/public;
 
-  # Real client IP from Cloudflare; tunnel always delivers HTTPS to the edge.
+  # Real client IP from Cloudflare when present (tunnel); $remote_addr on loopback.
   proxy_set_header Host $host;
-  proxy_set_header X-Real-IP $http_cf_connecting_ip;
-  proxy_set_header X-Forwarded-For $http_cf_connecting_ip;
+  proxy_set_header X-Real-IP $mastodon_client_ip;
+  proxy_set_header X-Forwarded-For $mastodon_client_ip;
   proxy_set_header X-Forwarded-Proto https;
 
   client_max_body_size 100m;
@@ -33,8 +33,8 @@ server {
 
   location /api/v1/streaming {
     proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $http_cf_connecting_ip;
-    proxy_set_header X-Forwarded-For $http_cf_connecting_ip;
+    proxy_set_header X-Real-IP $mastodon_client_ip;
+    proxy_set_header X-Forwarded-For $mastodon_client_ip;
     proxy_set_header X-Forwarded-Proto https;
     proxy_set_header Proxy "";
 
@@ -49,10 +49,11 @@ server {
     tcp_nodelay on;
   }
 
+  # No X-Forwarded-Proto here — Mastodon returns 404 on /health when told the request
+  # is HTTPS but the upstream socket is plain HTTP (loopback health checks).
   location = /health {
-    proxy_pass http://127.0.0.1:3000/health;
+    proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto https;
   }
 }
