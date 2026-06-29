@@ -384,9 +384,6 @@ cf_dns_upsert() {       # cf_dns_upsert ZONE_ID FQDN TARGET  (proxied CNAME, ups
   fi
 }
 
-  systemctl reload nginx
-}
-
 # ===========================================================================
 # Optional subcommands (run before install phases)
 # ===========================================================================
