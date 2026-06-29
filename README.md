@@ -219,9 +219,18 @@ Healthy logs are steady request/job lines. Trouble looks like repeated Ruby back
 ```bash
 curl -fsS http://127.0.0.1:3000/health                       # web    -> "OK"
 curl -fsS http://127.0.0.1:4000/api/v1/streaming/health      # stream -> "OK"
-curl -s -o /dev/null -w '%{http_code}\n' -H "Host: <web-domain>" http://127.0.0.1:80/health   # nginx -> 200
+source /root/mastodon-setup/.install-state
+curl -s -o /dev/null -w '%{http_code}\n' -H "Host: ${WEB_DOMAIN}" http://127.0.0.1:80/health   # nginx -> 200
 ```
 `200` / `OK` = good. `Connection refused` = the service behind it is down (check `systemctl`/`journalctl`). `502/504` = nginx is up but the app behind it isn't answering.
+
+**One-shot repairs** (safe; load state via `source`, no fragile quoting):
+
+```bash
+source /root/mastodon-setup/.install-state
+/root/mastodon-setup/setup.sh repair-nginx       # default site still serving? loopback /health 404?
+/root/mastodon-setup/setup.sh repair-streaming   # mastodon-streaming active but :4000 down?
+```
 
 ### PostgreSQL
 ```bash
@@ -340,11 +349,13 @@ You can re-run the installer at any time to reprint the Phase 14 pass/fail table
 
 | Symptom | Check |
 |---------|-------|
+| nginx welcome page or loopback `/health` 404 | `/root/mastodon-setup/setup.sh repair-nginx` (disables default site, reapplies mastodon vhost) |
+| `mastodon-streaming` active but streaming health fails | Mastodon 4.3+ shim only — `/root/mastodon-setup/setup.sh repair-streaming` (starts `mastodon-streaming@4000`) |
 | Federation not working | Bot Fight Mode disabled? `journalctl -u mastodon-sidekiq`; confirm nginx sends `X-Forwarded-Proto https`. |
 | Media not loading | `garage status`; `<media-domain>` DNS/tunnel route; `garage bucket info mastodon` (website + alias); tunnel routes media → `:3902`. |
 | WebSocket disconnects | Cloudflare WebSockets ON; streaming service active; nginx `/api/v1/streaming` upgrade headers present. |
 | Tunnel unhealthy | `journalctl -u cloudflared`; Super Bot Fight Mode; confirm `/etc/cloudflared/<tunnel-id>.json` exists and `config.yml` references it. |
-| Tunnel/DNS not created | Re-run `setup.sh` (re-prompts for the API token); confirm token scopes (Tunnel:Edit, DNS:Edit, Zone:Read) and that both hostnames' zones are Active. Conflicting A/AAAA records are removed automatically when the tunnel CNAME is created. |
+| Tunnel/DNS not created | Re-run `setup.sh` (re-prompts for the API token); confirm token scopes (Tunnel:Edit, DNS:Edit, Zone:Zone:Read) and that both hostnames' zones are Active. Conflicting A/AAAA records are removed automatically when the tunnel CNAME is created. |
 | After a node move | `mountpoint /mnt/garage-data`? `garage status` healthy? |
 
 ---

@@ -15,6 +15,9 @@
 # Reapply only the nginx mastodon vhost (after editing WEB_DOMAIN, etc.):
 #   /root/mastodon-setup/setup.sh repair-nginx
 #
+# Start the real streaming unit (Mastodon 4.3+ shim fix):
+#   /root/mastodon-setup/setup.sh repair-streaming
+#
 set -euo pipefail
 
 # ===========================================================================
@@ -22,7 +25,6 @@ set -euo pipefail
 # ===========================================================================
 MASTODON_SETUP_REPO="${MASTODON_SETUP_REPO:-sethvoltz/mastodon-setup-lxc}"
 MASTODON_SETUP_REF="${MASTODON_SETUP_REF:-main}"
-RAW_BASE="https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${MASTODON_SETUP_REF}"
 
 PACKAGE_FILES=(
   "setup.sh"
@@ -56,7 +58,7 @@ NODE_MAJOR_DEFAULT="24"   # fallback if .nvmrc missing; Phase 4 reads .nvmrc aft
 MASTODON_TAG="${MASTODON_TAG:-}"
 # Garage layout capacity string passed to `garage layout assign -c` (not the CephFS quota).
 GARAGE_LAYOUT_CAPACITY="${GARAGE_LAYOUT_CAPACITY:-100G}"
-SETUP_VERSION="7"
+SETUP_VERSION="8"
 
 # ===========================================================================
 # Helpers
@@ -144,19 +146,30 @@ package_complete() {
   done
 }
 
-# Fetch missing templates when run via curl (no local checkout on disk).
+# Fetch templates from GitHub; re-fetch all when the resolved commit SHA changes.
 ensure_package_at() {
-  local dest="$1" f
-  package_complete "$dest" && return 0
+  local dest="$1" f sha stored raw_base refresh=0
   command -v curl >/dev/null || die "curl required to fetch the setup package from GitHub."
   mkdir -p "$dest/garage" "$dest/systemd" "$dest/nginx" "$dest/cloudflared"
-  local raw_base="$RAW_BASE"
-  [[ -n "${MASTODON_SETUP_SHA:-}" ]] && raw_base="https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${MASTODON_SETUP_SHA}"
+  sha="${MASTODON_SETUP_SHA:-}"
+  if [[ -z "$sha" ]]; then
+    sha="$(resolve_ref_sha "$MASTODON_SETUP_REF")"
+    MASTODON_SETUP_SHA="$sha"
+  fi
+  stored=""
+  [[ -f "${dest}/.package-sha" ]] && stored="$(<"${dest}/.package-sha")"
+  package_complete "$dest" || refresh=1
+  [[ "$stored" == "$sha" ]] || refresh=1
+  if [[ "$refresh" -eq 0 ]]; then
+    return 0
+  fi
+  raw_base="https://raw.githubusercontent.com/${MASTODON_SETUP_REPO}/${sha}"
   for f in "${PACKAGE_FILES[@]}"; do
-    [[ -f "$dest/$f" ]] && continue
-    c_ok "Fetching ${f} (${MASTODON_SETUP_REF})..."
+    [[ "$f" == "setup.sh" ]] && continue
+    c_ok "Fetching ${f} (${MASTODON_SETUP_REF}@${sha:0:7})..."
     curl -fsSL "${raw_base}/${f}" -o "$dest/$f"
   done
+  printf '%s' "$sha" > "${dest}/.package-sha"
 }
 
 # Bare Debian LXC may not have curl yet; install it before we fetch templates.
@@ -393,6 +406,20 @@ if [[ "${1:-}" == "repair-nginx" ]]; then
     c_ok "nginx loopback /health -> ${code} (WEB_DOMAIN=${WEB_DOMAIN})"
   else
     c_err "nginx loopback /health -> ${code} (WEB_DOMAIN=${WEB_DOMAIN})"
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "repair-streaming" ]]; then
+  [[ -f "${LIVE}/dist/mastodon-streaming@.service" ]] \
+    || die "No mastodon-streaming@.service in ${LIVE}/dist/ — complete Phase 3 first."
+  STREAMING_UNIT="$(install_mastodon_streaming_units)"
+  code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:4000/api/v1/streaming/health" 2>/dev/null || echo 000)"
+  if [[ "$code" == "200" ]]; then
+    c_ok "streaming /health -> ${code} (${STREAMING_UNIT})"
+  else
+    c_err "streaming /health -> ${code} (${STREAMING_UNIT}); journalctl -u ${STREAMING_UNIT} -n 30"
     exit 1
   fi
   exit 0
