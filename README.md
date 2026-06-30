@@ -329,6 +329,45 @@ You can re-run the installer at any time to reprint the Phase 14 pass/fail table
   mountpoint /mnt/garage-data && garage status
   ```
 
+### Migration aborts: `volume deactivation failed` / `rbd: sysfs write failed`
+
+Symptom — migration shuts the CT down then immediately fails:
+
+```
+ERROR: volume deactivation failed: ceph:vm-<CTID>-disk-0
+can't unmap rbd device ...: rbd: sysfs write failed
+TASK ERROR: migration aborted
+```
+
+This is **not** the CephFS bind mount (that line, `ignoring shared 'bind' mount point 'mp0'`, is expected and harmless). It's the **rootfs RBD failing to unmap** on the source node. The image has the `exclusive-lock` feature, and migration tries to unmap in the same second it stops the container; the unmap loses a race and wedges, leaving the volume mapped on a *stopped* container — which then blocks every retry.
+
+Diagnose on the **source node** (confirm nothing actually holds it):
+
+```bash
+pct status <CTID>                       # should be: stopped
+rbd showmapped                          # rootfs still listed despite stopped CT = the wedge
+fuser -vam /dev/rbdN                    # expect: no processes
+lsof /dev/rbdN                          # expect: nothing
+lsblk /dev/rbdN                         # expect: plain ext4, no holders / no mountpoint
+```
+
+If all of the above are clean (CT stopped, no process, no mount, no block-layer holder), force the stuck unmap — safe here precisely because nothing holds it:
+
+```bash
+rbd unmap -o force /dev/rbdN
+rbd showmapped                          # the rootfs device should now be gone
+```
+
+Then re-run `pct migrate` — with no stale mapping, deactivation is a no-op and it completes instantly (shared storage; nothing is copied). First boot on the target may run a one-time fsck and take longer than usual.
+
+> `/dev/rbdN` is the container's **virtual disk** (`vm-<CTID>-disk-0`), not Ceph's own storage — unmapping it just disconnects a stopped guest's rootfs and is non-destructive; PVE remaps it automatically on next start. Ceph's OSD backing device is a separate LVM volume (`...-osd--block--...` in `dmsetup ls`) and is never touched here.
+
+**Permanent fix (optional)** — if this recurs on every stop/migrate, strip the lock features off the rootfs image so krbd unmaps reliably (trade-off: lose `fast-diff`/`object-map`, which only speed up `rbd du` and diff-based backups):
+
+```bash
+rbd feature disable ceph-metadata/vm-<CTID>-disk-0 fast-diff,object-map,exclusive-lock
+```
+
 ---
 
 ## 10. Troubleshooting quick reference
@@ -343,6 +382,7 @@ You can re-run the installer at any time to reprint the Phase 14 pass/fail table
 | Tunnel unhealthy | `journalctl -u cloudflared`; Super Bot Fight Mode; confirm `/etc/cloudflared/<tunnel-id>.json` exists and `config.yml` references it. |
 | Tunnel/DNS not created | Re-run `setup.sh` (re-prompts for the API token); confirm token scopes (Tunnel:Edit, DNS:Edit, Zone:Zone:Read) and that both hostnames' zones are Active. Conflicting A/AAAA records are removed automatically when the tunnel CNAME is created. |
 | After a node move | `mountpoint /mnt/garage-data`? `garage status` healthy? |
+| Migration aborts: `volume deactivation failed` / `rbd: sysfs write failed` | Stuck RBD unmap on the source node, not the bind mount. See [§9 → Migration aborts](#migration-aborts-volume-deactivation-failed--rbd-sysfs-write-failed). |
 
 ---
 
